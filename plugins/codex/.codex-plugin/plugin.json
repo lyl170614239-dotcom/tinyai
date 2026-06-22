@@ -1,0 +1,36 @@
+{
+  "name": "observability",
+  "version": "0.1.0+codex.20260618202148",
+  "description": "TinyAI observability plugin for Codex specs access and coding task telemetry.",
+  "author": {
+    "name": "TinyAI",
+    "email": "devnull@example.com",
+    "url": "https://example.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "observability",
+    "codex",
+    "mcp",
+    "openspec"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TinyAI Observability",
+    "shortDescription": "Collects privacy-safe AI coding telemetry.",
+    "longDescription": "Adds TinyAI OpenSpec search/read MCP tools and telemetry events for Codex coding tasks.",
+    "developerName": "TinyAI",
+    "category": "Productivity",
+    "capabilities": [
+      "MCP",
+      "Skills"
+    ],
+    "defaultPrompt": [
+      "Use TinyAI specs to ground this coding task.",
+      "Read the project personal specs before editing.",
+      "Mark the task result when the implementation is done."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

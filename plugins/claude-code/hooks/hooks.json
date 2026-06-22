@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=task_start TINYAI_OBS_PLUGIN_VERSION=0.1.0 TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true node runtime/dist/hook.js"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=task_end TINYAI_OBS_PLUGIN_VERSION=0.1.0 TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true node runtime/dist/hook.js"
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "tinyai-observability": {
+      "command": "node",
+      "args": ["runtime/dist/mcp-server.js"],
+      "env": {
+        "TINYAI_OBS_TOOL": "claude",
+        "TINYAI_OBS_COLLECTOR_URL": "${TINYAI_OBS_COLLECTOR_URL}",
+        "TINYAI_OBS_TOKEN": "${TINYAI_OBS_TOKEN}",
+        "TINYAI_OBS_PLUGIN_VERSION": "0.1.0",
+        "TINYAI_OBS_CAPTURE_CONVERSATION_TEXT": "true"
+      }
+    }
+  }
+}

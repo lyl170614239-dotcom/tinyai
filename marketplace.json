@@ -1,0 +1,20 @@
+{
+  "name": "tinyai-observability-local",
+  "interface": {
+    "displayName": "TinyAI Observability Local"
+  },
+  "plugins": [
+    {
+      "name": "tinyai-observability",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

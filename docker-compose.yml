@@ -1,0 +1,49 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: tinyai-observability-mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tinyobs}
+      MYSQL_USER: ${MYSQL_USER:-tinyobs}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tinyobs}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-tinyobs-root}
+    ports:
+      - "${OBS_MYSQL_PORT:-13306}:3306"
+    volumes:
+      - observability_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-tinyobs-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  collector:
+    build:
+      context: ./collector-server
+      dockerfile: Dockerfile
+    container_name: tinyai-observability-collector
+    env_file:
+      - .env
+    ports:
+      - "${OBS_COLLECTOR_PORT:-18080}:18080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  dashboard:
+    image: node:24-alpine
+    container_name: tinyai-observability-dashboard
+    working_dir: /app
+    env_file:
+      - .env
+    ports:
+      - "${OBS_DASHBOARD_PORT:-18081}:18081"
+    volumes:
+      - ./dashboard-minimal:/app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 18081"
+    depends_on:
+      - collector
+
+volumes:
+  observability_mysql:
+

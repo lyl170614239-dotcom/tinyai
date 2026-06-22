@@ -1,0 +1,7 @@
+name: observability
+version: 0.1.0
+description: TinyAI observability guidance for Codex.
+instructions: |
+  Use the observability skill and MCP tools when a coding task depends on
+  OpenSpec project knowledge. Prefer personal specs, record task completion, and
+  avoid uploading sensitive raw content.

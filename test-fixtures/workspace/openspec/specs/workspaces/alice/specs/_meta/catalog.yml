@@ -1,0 +1,13 @@
+pages:
+  - path: orders/order-status.md
+    title: Order status workflow
+    keywords:
+      - order
+      - status
+      - hotel
+    related_code:
+      - src/orders/status.ts
+    module: orders
+    tags:
+      - booking
+      - workflow

@@ -1,0 +1,11 @@
+{
+  "name": "observability",
+  "version": "0.1.0",
+  "description": "Native TinyAI observability plugin for Claude Code specs and coding task telemetry.",
+  "author": {
+    "name": "TinyAI"
+  },
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
+}

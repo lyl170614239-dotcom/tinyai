@@ -1,0 +1,11 @@
+{
+  "name": "tinyai-observability",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:runtime": "npm --prefix plugin-runtime run build",
+    "build:vscode": "npm --prefix plugins/vscode-copilot run compile",
+    "typecheck": "npm --prefix plugin-runtime run typecheck && npm --prefix plugins/vscode-copilot run typecheck"
+  }
+}
