@@ -7,8 +7,10 @@
     {
       "name": "observability",
       "source": {
-        "source": "local",
-        "path": "./plugins/codex"
+        "source": "git-subdir",
+        "url": "git@github.com:lyl170614239-dotcom/tinyai.git",
+        "path": "plugins/codex",
+        "ref": "main"
       },
       "policy": {
         "installation": "AVAILABLE",
