@@ -684,6 +684,179 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(detail["turns"][0]["code_changes"][0]["lines_deleted"], 1)
         self.assertEqual(blob["content"], large_tool_result)
 
+    def test_claude_conversation_and_turn_snapshots_do_not_duplicate_messages(self):
+        conversation_event = EventIn(
+            event_id="claude-conv-no-dupe",
+            task_id="claude-session-no-dupe",
+            session_id="claude-session-no-dupe",
+            tool="claude",
+            event_type="conversation_snapshot",
+            occurred_at=datetime(2026, 6, 29, 7, 25, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "claude-session-no-dupe",
+                "title": "你好",
+                "session_status": "completed",
+                "resolved_model": "claude-opus-4-6",
+                "messages": [
+                    {
+                        "role": "user",
+                        "text": "你好",
+                        "message_id": "claude-message-user-1",
+                        "turn_index": 1,
+                        "occurred_at": "2026-06-29T07:25:01Z",
+                    },
+                    {
+                        "role": "assistant",
+                        "text": "你好！有什么我可以帮您的吗？",
+                        "message_id": "claude-message-assistant-1",
+                        "turn_index": 1,
+                        "occurred_at": "2026-06-29T07:25:06Z",
+                    },
+                ],
+            },
+        )
+        turn_event = EventIn(
+            event_id="claude-turn-no-dupe",
+            task_id="claude-session-no-dupe",
+            session_id="claude-session-no-dupe",
+            tool="claude",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 6, 29, 7, 25, 8, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "claude-session-no-dupe",
+                "request_id": "claude-request-1",
+                "response_id": "claude-response-1",
+                "title": "你好",
+                "resolved_model": "claude-opus-4-6",
+                "turn": {
+                    "turn_index": 1,
+                    "request_id": "claude-request-1",
+                    "response_id": "claude-response-1",
+                    "status": "completed",
+                    "started_at": "2026-06-29T07:25:01Z",
+                    "completed_at": "2026-06-29T07:25:06Z",
+                },
+                "messages": [
+                    {
+                        "role": "user",
+                        "text": "你好",
+                        "source_key": "msg_20260629072501_user",
+                        "occurred_at": "2026-06-29T07:25:01Z",
+                    },
+                    {
+                        "role": "assistant",
+                        "text": "你好！有什么我可以帮您的吗？",
+                        "source_key": "msg_20260629072506_assistant",
+                        "occurred_at": "2026-06-29T07:25:06Z",
+                    },
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-claude",
+            plugin_name="tinyai-observability-claude",
+            plugin_version="0.1.36",
+            username="lyl",
+            user_id="user-1",
+            events=[conversation_event, turn_event],
+        )
+
+        result = ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        messages = self.db.execute(select(AiMessage).order_by(AiMessage.message_index)).scalars().all()
+        detail = get_session_detail("claude-session-no-dupe", db=self.db)
+
+        self.assertEqual(result["accepted"], 2)
+        self.assertEqual(stats["succeeded"], 2)
+        self.assertEqual(len(self.db.execute(select(AiTurn)).scalars().all()), 1)
+        self.assertEqual([(message.role, message.content) for message in messages], [("user", "你好"), ("assistant", "你好！有什么我可以帮您的吗？")])
+        self.assertEqual(len(detail["turns"][0]["user_messages"]), 1)
+        self.assertEqual(len(detail["turns"][0]["assistant_messages"]), 1)
+
+    def test_session_detail_hides_legacy_duplicate_messages(self):
+        now = datetime(2026, 6, 29, 7, 25, tzinfo=timezone.utc)
+        text_hash = hashlib.sha256("你好！有什么我可以帮您的吗？".encode("utf-8")).hexdigest()
+        self.db.add(
+            AiSession(
+                session_id="legacy-dupe-session",
+                task_id="legacy-dupe-session",
+                tool="claude",
+                status="completed",
+                title="你好",
+                username="lyl",
+                user_id="user-1",
+                started_at=now,
+                last_activity_at=now,
+            )
+        )
+        self.db.flush()
+        turn = AiTurn(
+            session_id="legacy-dupe-session",
+            task_id="legacy-dupe-session",
+            turn_index=1,
+            status="completed",
+            created_at=now,
+            completed_at=now,
+        )
+        self.db.add(turn)
+        self.db.flush()
+        self.db.add_all(
+            [
+                AiMessage(
+                    session_id="legacy-dupe-session",
+                    task_id="legacy-dupe-session",
+                    turn_id=turn.id,
+                    message_index=0,
+                    turn_index=1,
+                    role="user",
+                    content="你好",
+                    text_len=2,
+                    text_hash=hashlib.sha256("你好".encode("utf-8")).hexdigest(),
+                    source_key="legacy-user",
+                    occurred_at=now,
+                ),
+                AiMessage(
+                    session_id="legacy-dupe-session",
+                    task_id="legacy-dupe-session",
+                    turn_id=turn.id,
+                    message_index=1,
+                    turn_index=1,
+                    role="assistant",
+                    content="你好！有什么我可以帮您的吗？",
+                    text_len=15,
+                    text_hash=text_hash,
+                    source_key="legacy-assistant-conversation",
+                    occurred_at=now,
+                ),
+                AiMessage(
+                    session_id="legacy-dupe-session",
+                    task_id="legacy-dupe-session",
+                    turn_id=turn.id,
+                    message_index=2,
+                    turn_index=1,
+                    role="assistant",
+                    content="你好！有什么我可以帮您的吗？",
+                    text_len=15,
+                    text_hash=text_hash,
+                    source_key="legacy-assistant-turn",
+                    occurred_at=now,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        detail = get_session_detail("legacy-dupe-session", db=self.db)
+
+        self.assertEqual(len(detail["turns"][0]["user_messages"]), 1)
+        self.assertEqual(len(detail["turns"][0]["assistant_messages"]), 1)
+        self.assertEqual(detail["turns"][0]["assistant_messages"][0]["content"], "你好！有什么我可以帮您的吗？")
+
     def test_turn_snapshot_derives_specs_accesses_into_product_table(self):
         patch = (
             "*** Begin Patch\n"

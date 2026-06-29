@@ -567,13 +567,18 @@ def _upsert_turn(
             .scalar_one_or_none()
         )
     if not turn:
+        turn_query = (
+            select(AiTurn)
+            .where(AiTurn.session_id == session_id)
+            .where(AiTurn.turn_index == turn_index)
+        )
+        if request_id:
+            turn_query = turn_query.where(or_(AiTurn.request_id.is_(None), AiTurn.request_id == request_id))
+        if response_id:
+            turn_query = turn_query.where(or_(AiTurn.response_id.is_(None), AiTurn.response_id == response_id))
         turn = (
             db.execute(
-                select(AiTurn)
-                .where(AiTurn.session_id == session_id)
-                .where(AiTurn.turn_index == turn_index)
-                .where(AiTurn.request_id.is_(None) if request_id else True)
-                .where(AiTurn.response_id.is_(None) if response_id else True)
+                turn_query.order_by(AiTurn.request_id.is_(None).asc(), AiTurn.response_id.is_(None).asc(), AiTurn.id.asc()).limit(1)
             )
             .scalar_one_or_none()
         )
@@ -606,6 +611,11 @@ def _upsert_turn(
 def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: dict[str, Any], turn: AiTurn | None) -> AiMessage:
     message_index = int(message.get("message_index") or 0)
     source_key = str(message.get("source_key") or "")[:256] or None
+    occurred = _parse_time(message.get("occurred_at"), event.occurred_at)
+    content = str(message.get("content") or "")
+    text_hash = hashlib.sha256(content.encode("utf-8")).hexdigest() if content else str(message.get("content_hash") or "")[:128]
+    role = str(message.get("role") or "message")[:32]
+    turn_index = turn.turn_index if turn else int(message.get("turn_index") or 0)
     existing = None
     if source_key:
         existing = (
@@ -625,6 +635,19 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
             )
             .scalar_one_or_none()
         )
+    if not existing and text_hash:
+        existing = (
+            db.execute(
+                select(AiMessage)
+                .where(AiMessage.session_id == session_id)
+                .where(AiMessage.turn_index == turn_index)
+                .where(AiMessage.role == role)
+                .where(AiMessage.text_hash == text_hash)
+                .order_by(AiMessage.id.asc())
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
     if not existing and source_key:
         index_taken = (
             db.execute(
@@ -636,14 +659,10 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
         )
         if index_taken is not None:
             message_index = int(db.execute(select(func.max(AiMessage.message_index)).where(AiMessage.session_id == session_id)).scalar() or -1) + 1
-    occurred = _parse_time(message.get("occurred_at"), event.occurred_at)
-    content = str(message.get("content") or "")
-    text_hash = str(message.get("content_hash") or hashlib.sha256(content.encode("utf-8")).hexdigest())[:128]
-    role = str(message.get("role") or "message")[:32]
     if existing:
         row = existing
         row.turn_id = turn.id if turn else row.turn_id
-        row.turn_index = turn.turn_index if turn else int(message.get("turn_index") or row.turn_index or 0)
+        row.turn_index = turn_index or row.turn_index or 0
         row.role = role
         row.content = content
         row.text_len = int(message.get("text_len") or len(content))
@@ -658,7 +677,7 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
             task_id=event.task_id,
             turn_id=turn.id if turn else None,
             message_index=message_index,
-            turn_index=turn.turn_index if turn else int(message.get("turn_index") or 0),
+            turn_index=turn_index,
             role=role,
             content=content,
             text_len=int(message.get("text_len") or len(content)),

@@ -379,6 +379,42 @@ def _message_out(message: AiMessage) -> dict:
     }
 
 
+def _dedupe_session_messages(messages: list[AiMessage]) -> list[AiMessage]:
+    """Hide duplicate logical chat messages produced by overlapping snapshot sources.
+
+    Claude/Codex/Copilot adapters may receive both a whole-session snapshot and
+    per-turn snapshots. The raw events are intentionally preserved, but the
+    product timeline should show one logical user/assistant message per turn.
+    """
+    seen: set[tuple[int, str, str]] = set()
+    deduped: list[AiMessage] = []
+    for message in messages:
+        content_key = " ".join((message.content or "").split())
+        if not content_key:
+            content_key = message.text_hash or ""
+        key = (message.turn_index, message.role, content_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(message)
+    return deduped
+
+
+def _dedupe_session_turns(turns: list[AiTurn]) -> list[AiTurn]:
+    """Return one display turn per turn index, preferring the most complete row."""
+    by_index: dict[int, AiTurn] = {}
+    for turn in turns:
+        existing = by_index.get(turn.turn_index)
+        if existing is None:
+            by_index[turn.turn_index] = turn
+            continue
+        existing_score = int(bool(existing.request_id)) + int(bool(existing.response_id)) + int(bool(existing.completed_at))
+        current_score = int(bool(turn.request_id)) + int(bool(turn.response_id)) + int(bool(turn.completed_at))
+        if current_score > existing_score:
+            by_index[turn.turn_index] = turn
+    return [by_index[index] for index in sorted(by_index)]
+
+
 def _step_out(step: AiProcessStep) -> dict:
     return {
         "id": step.id,
@@ -762,8 +798,12 @@ def get_session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="session not found")
 
     related_ids = _related_session_ids(session)
-    turns = db.execute(select(AiTurn).where(AiTurn.session_id == session_id).order_by(AiTurn.turn_index.asc())).scalars().all()
-    messages = db.execute(select(AiMessage).where(AiMessage.session_id == session_id).order_by(AiMessage.message_index.asc())).scalars().all()
+    turns = _dedupe_session_turns(
+        db.execute(select(AiTurn).where(AiTurn.session_id == session_id).order_by(AiTurn.turn_index.asc(), AiTurn.id.asc())).scalars().all()
+    )
+    messages = _dedupe_session_messages(
+        db.execute(select(AiMessage).where(AiMessage.session_id == session_id).order_by(AiMessage.message_index.asc())).scalars().all()
+    )
     steps = db.execute(
         select(AiProcessStep)
         .where(or_(AiProcessStep.session_id.in_(related_ids), AiProcessStep.task_id.in_(related_ids)))
