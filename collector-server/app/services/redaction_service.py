@@ -27,7 +27,7 @@ def redact_value(value: Any, *, allow_full_conversation_text: bool = False) -> A
         selected_items = items if allow_full_conversation_text else items[:80]
         for key, item in selected_items:
             key_text = str(key)
-            if key_text.lower() in BLOCKED_KEYS:
+            if key_text.lower() in BLOCKED_KEYS and not allow_full_conversation_text:
                 clean[key_text] = "[REDACTED]"
             else:
                 clean[key_text] = redact_value(item, allow_full_conversation_text=allow_full_conversation_text)

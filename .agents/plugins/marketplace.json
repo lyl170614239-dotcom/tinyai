@@ -8,7 +8,7 @@
       "name": "observability",
       "source": {
         "source": "git-subdir",
-        "url": "git@github.com:lyl170614239-dotcom/tinyai.git",
+        "url": "https://github.com/lyl170614239-dotcom/tinyai.git",
         "path": "plugins/codex",
         "ref": "main"
       },

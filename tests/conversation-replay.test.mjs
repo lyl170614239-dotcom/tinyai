@@ -1,0 +1,68 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { resolve } from "node:path";
+
+import {
+  captureLatestClaudeConversation,
+  captureLatestCodexConversation
+} from "../plugin-runtime/dist/conversation.js";
+
+test("Claude replay removes tool-only and duplicate entries but preserves repeated prompts in separate turns", async () => {
+  const snapshot = await captureLatestClaudeConversation({
+    includeText: true,
+    sessionFile: resolve("tests/fixtures/claude-conversation.jsonl"),
+    sessionId: "claude-test-session"
+  });
+
+  assert.equal(snapshot.session_id, "claude-test-session");
+  assert.deepEqual(snapshot.messages.map((message) => [message.role, message.text]), [
+    ["user", "继续"],
+    ["assistant", "第一轮完成"],
+    ["user", "继续"],
+    ["assistant", "第二轮完成"]
+  ]);
+  assert.equal(snapshot.user_message_count, 2);
+  assert.equal(snapshot.assistant_message_count, 2);
+  assert.equal(snapshot.file_reads?.[0]?.path, "README.md");
+  assert.ok(snapshot.process_steps?.every((step) => step.step_id));
+});
+
+test("Codex replay ignores empty event messages and binds the requested session file", async () => {
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    sessionFile: resolve("tests/fixtures/codex-conversation.jsonl")
+  });
+
+  assert.equal(snapshot.session_id, "codex-test-session");
+  assert.deepEqual(snapshot.messages.map((message) => [message.role, message.text]), [
+    ["user", "检查项目"],
+    ["assistant", "检查完成"]
+  ]);
+  assert.equal(snapshot.tool_call_count, 1);
+  assert.equal(snapshot.file_reads?.[0]?.path, "README.md");
+  assert.equal(snapshot.model, "gpt-5.5");
+  assert.equal(snapshot.request_usage?.[0]?.model, "gpt-5.5");
+  assert.equal(snapshot.request_usage?.[0]?.prompt_tokens, 100);
+  assert.equal(snapshot.request_usage?.[0]?.output_tokens, 20);
+  assert.equal(snapshot.request_usage?.[0]?.elapsed_ms, 1234);
+  assert.equal(snapshot.usage_totals?.prompt_tokens, 100);
+  assert.equal(snapshot.usage_totals?.output_tokens, 20);
+  assert.equal(snapshot.usage_totals?.elapsed_ms, 1234);
+  assert.ok(snapshot.process_steps?.every((step) => step.step_id));
+});
+
+test("Codex replay derives code edits from apply_patch input", async () => {
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    latestTurnOnly: true,
+    sessionFile: resolve("tests/fixtures/codex-apply-patch.jsonl")
+  });
+
+  assert.equal(snapshot.session_id, "codex-apply-patch-session");
+  assert.equal(snapshot.latest_turn_complete, true);
+  assert.equal(snapshot.code_edits?.length, 1);
+  assert.equal(snapshot.code_edits?.[0]?.file_path, "刘芸隆.md");
+  assert.equal(snapshot.code_edits?.[0]?.lines_added, 3);
+  assert.equal(snapshot.code_edits?.[0]?.lines_deleted, 0);
+  assert.equal(snapshot.code_edits?.[0]?.hunks[0]?.lines[0]?.text, "# 刘芸隆的开心故事");
+});

@@ -1,6 +1,6 @@
 {
   "name": "observability",
-  "version": "0.1.0+codex.20260618202148",
+  "version": "0.1.1+codex.20260624024031",
   "description": "TinyAI observability plugin for Codex specs access and coding task telemetry.",
   "author": {
     "name": "TinyAI",

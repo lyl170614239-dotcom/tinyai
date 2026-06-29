@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { DEFAULT_TINYAI_ENV_FILE, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool } from "./config.js";
+import { redactText } from "./redactor.js";
 const execFileAsync = promisify(execFile);
 async function git(workspacePath, args, timeout = 10000) {
-    const { stdout } = await execFileAsync("git", args, { cwd: workspacePath, timeout });
+    const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], { cwd: workspacePath, timeout });
     return stdout.trim();
 }
 async function resolvedGitDir(workspacePath) {
@@ -24,7 +26,198 @@ function markerTtlMs() {
     return (Number.isFinite(seconds) && seconds > 0 ? seconds : 21600) * 1000;
 }
 function lineHash(filePath, content) {
-    return createHash("sha256").update(`${filePath}\0${content}`).digest("hex").slice(0, 32);
+    return createHash("sha256").update(`${filePath}\0${content}`).digest("hex");
+}
+function isSensitiveDiffPath(filePath) {
+    const normalized = filePath.toLowerCase();
+    return (/(^|\/)\.env(?:\.|$)/.test(normalized) ||
+        /(^|\/)(\.?npmrc|\.?pypirc|\.?netrc|id_rsa|id_ed25519)$/.test(normalized) ||
+        /(secret|secrets|credential|credentials|token|private-key|private_key)/.test(normalized));
+}
+function decodeGitQuotedPath(raw) {
+    const trimmed = raw.trim();
+    const isQuoted = trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"');
+    const inner = isQuoted ? trimmed.slice(1, -1) : trimmed;
+    if (!/\\(?:[0-7]{3}|[abfnrtv\\"'])/.test(inner))
+        return trimmed;
+    const bytes = [];
+    for (let index = 0; index < inner.length; index += 1) {
+        const char = inner[index];
+        if (char !== "\\") {
+            for (const byte of Buffer.from(char, "utf8"))
+                bytes.push(byte);
+            continue;
+        }
+        const next = inner[index + 1];
+        const octal = inner.slice(index + 1, index + 4);
+        if (/^[0-7]{3}$/.test(octal)) {
+            bytes.push(Number.parseInt(octal, 8));
+            index += 3;
+            continue;
+        }
+        const escapes = {
+            a: 0x07,
+            b: 0x08,
+            f: 0x0c,
+            n: 0x0a,
+            r: 0x0d,
+            t: 0x09,
+            v: 0x0b,
+            "\\": 0x5c,
+            '"': 0x22,
+            "'": 0x27
+        };
+        if (next && Object.prototype.hasOwnProperty.call(escapes, next)) {
+            bytes.push(escapes[next]);
+            index += 1;
+        }
+        else {
+            bytes.push(0x5c);
+        }
+    }
+    return Buffer.from(bytes).toString("utf8");
+}
+function normalizeDiffPath(raw) {
+    let path = decodeGitQuotedPath(raw.trim()).replace(/\\/g, "/");
+    if (path.startsWith("a/") || path.startsWith("b/"))
+        path = path.slice(2);
+    return path;
+}
+function safeDiffLineText(filePath, text, includeText) {
+    if (!includeText)
+        return { text: "[text not stored]", redacted: true };
+    if (isSensitiveDiffPath(filePath))
+        return { text: "[REDACTED:SENSITIVE_FILE]", redacted: true };
+    const redacted = redactText(text, { allowFullConversationText: true });
+    return { text: redacted, redacted: redacted !== text };
+}
+function parseUnifiedDiffDetails(diff, options = {}) {
+    const includeText = options.includeText ?? true;
+    const maxFiles = options.maxFiles ?? 30;
+    const maxLinesPerFile = options.maxLinesPerFile ?? 240;
+    const files = [];
+    let currentFile;
+    let currentHunk;
+    let pendingOldPath;
+    let oldLine = 0;
+    let newLine = 0;
+    let totalAdded = 0;
+    let totalDeleted = 0;
+    let truncated = false;
+    function pushFile(file) {
+        if (!file)
+            return;
+        if (files.length >= maxFiles) {
+            truncated = true;
+            return;
+        }
+        files.push(file);
+    }
+    function addLine(lineType, rawText) {
+        if (!currentFile || !currentHunk)
+            return;
+        if (currentFile.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0) >= maxLinesPerFile) {
+            truncated = true;
+            return;
+        }
+        const display = safeDiffLineText(currentFile.file_path, rawText, includeText);
+        const detail = {
+            line_type: lineType,
+            text: display.text,
+            text_hash: lineHash(currentFile.file_path, rawText)
+        };
+        if (display.redacted)
+            detail.redacted = true;
+        if (lineType === "added") {
+            detail.new_line = newLine;
+            currentFile.lines_added += 1;
+            totalAdded += 1;
+            newLine += 1;
+        }
+        else if (lineType === "removed") {
+            detail.old_line = oldLine;
+            currentFile.lines_deleted += 1;
+            totalDeleted += 1;
+            oldLine += 1;
+        }
+        else {
+            detail.old_line = oldLine;
+            detail.new_line = newLine;
+            oldLine += 1;
+            newLine += 1;
+        }
+        currentHunk.lines.push(detail);
+    }
+    for (const line of diff.split(/\r?\n/)) {
+        if (line.startsWith("diff --git ")) {
+            pushFile(currentFile);
+            currentFile = undefined;
+            currentHunk = undefined;
+            pendingOldPath = undefined;
+            continue;
+        }
+        if (line.startsWith("Binary files ")) {
+            if (currentFile)
+                currentFile.binary = true;
+            continue;
+        }
+        if (line.startsWith("--- ")) {
+            const oldPath = line.slice(4).trim();
+            pendingOldPath = oldPath === "/dev/null" ? undefined : normalizeDiffPath(oldPath);
+            continue;
+        }
+        if (line.startsWith("+++ ")) {
+            const path = line.slice(4).trim();
+            const filePath = path === "/dev/null" ? currentFile?.old_path || "" : normalizeDiffPath(path);
+            currentFile = {
+                file_path: filePath,
+                old_path: pendingOldPath,
+                sensitive: isSensitiveDiffPath(filePath),
+                lines_added: 0,
+                lines_deleted: 0,
+                hunks: []
+            };
+            continue;
+        }
+        const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+        if (hunk && currentFile) {
+            oldLine = Number.parseInt(hunk[1], 10);
+            newLine = Number.parseInt(hunk[3], 10);
+            currentHunk = {
+                old_start: oldLine,
+                old_lines: Number.parseInt(hunk[2] || "1", 10),
+                new_start: newLine,
+                new_lines: Number.parseInt(hunk[4] || "1", 10),
+                lines: []
+            };
+            currentFile.hunks.push(currentHunk);
+            continue;
+        }
+        if (!currentFile || !currentHunk || line.startsWith("\\ No newline"))
+            continue;
+        if (line.startsWith("+") && !line.startsWith("+++")) {
+            addLine("added", line.slice(1));
+        }
+        else if (line.startsWith("-") && !line.startsWith("---")) {
+            addLine("removed", line.slice(1));
+        }
+        else if (line.startsWith(" ")) {
+            addLine("context", line.slice(1));
+        }
+    }
+    pushFile(currentFile);
+    const filePaths = files.map((file) => file.file_path).filter(Boolean);
+    return {
+        snapshot_kind: "workspace_diff",
+        diff_hash: createHash("sha256").update(diff).digest("hex").slice(0, 32),
+        include_text: includeText,
+        truncated,
+        files_changed: filePaths.length,
+        lines_added: totalAdded,
+        lines_deleted: totalDeleted,
+        file_paths: filePaths.slice(0, 100),
+        files
+    };
 }
 function parseUnifiedAddedLines(diff) {
     const added = [];
@@ -37,7 +230,7 @@ function parseUnifiedAddedLines(diff) {
         }
         if (line.startsWith("+++ ")) {
             const path = line.slice(4).trim();
-            currentFile = path === "/dev/null" ? "" : path.replace(/^b\//, "");
+            currentFile = path === "/dev/null" ? "" : normalizeDiffPath(path);
             continue;
         }
         const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
@@ -209,8 +402,9 @@ function parseNumstat(stdout) {
     let linesDeleted = 0;
     const filePaths = [];
     for (const row of rows) {
-        const [added, deleted, ...pathParts] = row.split(/\s+/);
-        const filePath = pathParts.join(" ");
+        const parts = row.includes("\t") ? row.split("\t") : row.split(/\s+/);
+        const [added, deleted, ...pathParts] = parts;
+        const filePath = normalizeDiffPath(pathParts.join(row.includes("\t") ? "\t" : " "));
         if (filePath)
             filePaths.push(filePath);
         linesAdded += Number.parseInt(added, 10) || 0;
@@ -230,6 +424,82 @@ export async function diffSummary(workspacePath) {
     catch {
         return { files_changed: 0, lines_added: 0, lines_deleted: 0, file_paths: [] };
     }
+}
+export async function currentDiffDetails(workspacePath, options = {}) {
+    try {
+        const paths = normalizePathspecs(options.paths);
+        const pathspecs = paths.length > 0 ? paths : ["."];
+        const args = [options.staged ? "diff" : "diff", options.staged ? "--cached" : "", "--unified=3", "--no-color", "--", ...pathspecs].filter(Boolean);
+        const trackedDiff = await git(workspacePath, args, 30000);
+        const untrackedDiff = options.includeUntracked && !options.staged ? await untrackedFilesDiff(workspacePath, pathspecs, options.includeText ?? true) : "";
+        const diff = [trackedDiff, untrackedDiff].filter(Boolean).join("\n");
+        return {
+            ...parseUnifiedDiffDetails(diff, options),
+            diff_raw: diff || undefined
+        };
+    }
+    catch {
+        return {
+            snapshot_kind: "workspace_diff",
+            diff_hash: "",
+            diff_raw: undefined,
+            include_text: options.includeText ?? true,
+            truncated: false,
+            files_changed: 0,
+            lines_added: 0,
+            lines_deleted: 0,
+            file_paths: [],
+            files: []
+        };
+    }
+}
+function normalizePathspecs(paths) {
+    const output = new Set();
+    for (const raw of paths || []) {
+        let value = raw.trim().replace(/\\/g, "/");
+        if (!value || value.includes("\0"))
+            continue;
+        value = value.replace(/^file:\/\//, "");
+        value = value.replace(/^\.?\//, "");
+        if (value.startsWith("a/") || value.startsWith("b/"))
+            value = value.slice(2);
+        if (value && value.length < 1000)
+            output.add(value);
+    }
+    return [...output].slice(0, 50);
+}
+async function untrackedFilesDiff(workspacePath, pathspecs, includeText) {
+    let raw = "";
+    try {
+        raw = await git(workspacePath, ["ls-files", "--others", "--exclude-standard", "--", ...pathspecs], 20000);
+    }
+    catch {
+        return "";
+    }
+    const files = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 50);
+    const chunks = [];
+    for (const filePath of files) {
+        if (isSensitiveDiffPath(filePath))
+            continue;
+        try {
+            const content = await readFile(join(workspacePath, filePath), "utf8");
+            const lines = content.split(/\r?\n/);
+            if (lines.length > 0 && lines[lines.length - 1] === "")
+                lines.pop();
+            chunks.push([
+                `diff --git a/${filePath} b/${filePath}`,
+                "new file mode 100644",
+                "--- /dev/null",
+                `+++ b/${filePath}`,
+                `@@ -0,0 +1,${lines.length} @@`,
+                ...lines.map((line) => `+${includeText ? line : "[text not stored]"}`)
+            ].join("\n"));
+        }
+        catch {
+            // Best effort: an unreadable untracked file should not block tracked diff capture.
+        }
+    }
+    return chunks.join("\n");
 }
 export async function currentBranch(workspacePath) {
     try {
@@ -251,20 +521,31 @@ export async function commitSnapshot(workspacePath, ref = "HEAD", options = {}) 
     try {
         const summary = parseNumstat(await git(workspacePath, ["show", "--numstat", "--format=", ref, "--", "."]));
         const attr = await attribution(workspacePath, options);
-        const lineAttribution = await lineAttributionForCommit(workspacePath, ref);
+        const diffRaw = await git(workspacePath, ["show", "--unified=3", "--no-color", "--format=", ref, "--", "."], 30000);
+        const diffDetails = parseUnifiedDiffDetails(diffRaw, { includeText: true, maxFiles: 1000, maxLinesPerFile: 20000 });
         return {
             ...summary,
             commit_sha: await git(workspacePath, ["rev-parse", ref]),
             branch: await currentBranch(workspacePath),
             snapshot_kind: "commit",
+            diff_hash: diffDetails.diff_hash,
+            diff_raw: diffRaw,
+            include_text: true,
+            truncated: diffDetails.truncated,
+            files: diffDetails.files,
             ...attr,
-            ai_lines_added: attr.ai_assisted ? lineAttribution.ai_added_lines : 0,
-            ai_lines_deleted: attr.ai_assisted ? summary.lines_deleted : 0,
-            human_lines_added: attr.ai_assisted ? lineAttribution.human_added_lines : summary.lines_added,
-            line_attribution: attr.ai_assisted
-                ? lineAttribution
-                : { ...lineAttribution, ai_added_lines: 0, human_added_lines: summary.lines_added },
-            ai_attribution_method: "line_hash_diff_attribution"
+            ai_lines_added: 0,
+            ai_lines_deleted: 0,
+            ai_lines_modified: 0,
+            human_lines_added: summary.lines_added,
+            human_lines_deleted: summary.lines_deleted,
+            human_lines_modified: 0,
+            ai_added_ratio: 0,
+            ai_deleted_ratio: 0,
+            ai_modified_ratio: 0,
+            ai_overall_change_ratio: 0,
+            line_attribution: { total_added_lines: summary.lines_added, ai_added_lines: 0, human_added_lines: summary.lines_added, files: [] },
+            ai_attribution_method: "server_commit_diff_matched_to_ai_code_changes"
         };
     }
     catch {
@@ -277,9 +558,16 @@ export async function commitSnapshot(workspacePath, ref = "HEAD", options = {}) 
             ai_assisted: false,
             ai_lines_added: 0,
             ai_lines_deleted: 0,
-            ai_attribution_method: "line_hash_diff_attribution",
+            ai_lines_modified: 0,
+            ai_attribution_method: "server_commit_diff_matched_to_ai_code_changes",
             ai_attribution_evidence: "snapshot_failed",
             human_lines_added: 0,
+            human_lines_deleted: 0,
+            human_lines_modified: 0,
+            ai_added_ratio: 0,
+            ai_deleted_ratio: 0,
+            ai_modified_ratio: 0,
+            ai_overall_change_ratio: 0,
             line_attribution: { total_added_lines: 0, ai_added_lines: 0, human_added_lines: 0, files: [] }
         };
     }
@@ -362,32 +650,98 @@ export async function installGitHooks(workspacePath, options) {
     const hooksDir = join(gitDir, "hooks");
     await mkdir(hooksDir, { recursive: true });
     const hookScript = fileURLToPath(new URL("./hook.js", import.meta.url));
-    const envLines = [
-        `TINYAI_OBS_TOOL=${shellQuote(options.tool)}`,
-        `TINYAI_OBS_PLUGIN_VERSION=${shellQuote(options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0")}`,
-        "TINYAI_OBS_REQUIRE_AI_MARKER='1'",
-        "TINYAI_OBS_SKIP_UNMARKED_COMMITS='1'"
+    const envFile = options.envFile || process.env.TINYAI_OBS_ENV_FILE || DEFAULT_TINYAI_ENV_FILE;
+    const hookTool = process.env.TINYAI_OBS_GIT_HOOK_TOOL || "copilot";
+    const fallbackUrls = (options.fallbackUrls && options.fallbackUrls.length > 0 ? options.fallbackUrls : tinyAiCollectorFallbackUrlsForTool(options.tool, workspacePath)).filter(Boolean);
+    const fallbackEnv = fallbackUrls.length > 0 ? fallbackUrls.join(",") : process.env.TINYAI_OBS_COLLECTOR_URLS;
+    const setupLines = [
+        `TINYAI_OBS_ENV_FILE=${shellQuote(envFile)}`,
+        `if [ -f "$TINYAI_OBS_ENV_FILE" ]; then . "$TINYAI_OBS_ENV_FILE"; fi`,
+        `if [ -z "$\{TINYAI_OBS_COLLECTOR_URL:-}" ]; then TINYAI_OBS_COLLECTOR_URL=${shellQuote(options.collectorUrl || tinyAiCollectorUrlForTool(options.tool, workspacePath))}; fi`,
+        fallbackEnv ? `if [ -z "$\{TINYAI_OBS_COLLECTOR_URLS:-}" ]; then TINYAI_OBS_COLLECTOR_URLS=${shellQuote(fallbackEnv)}; fi` : "",
+        options.token || process.env.TINYAI_OBS_TOKEN ? `if [ -z "$\{TINYAI_OBS_TOKEN:-}" ]; then TINYAI_OBS_TOKEN=${shellQuote(options.token || process.env.TINYAI_OBS_TOKEN || "")}; fi` : "",
+        `export TINYAI_OBS_ENV_FILE TINYAI_OBS_COLLECTOR_URL TINYAI_OBS_COLLECTOR_URLS TINYAI_OBS_TOKEN`,
+        `export TINYAI_OBS_WORKSPACE=${shellQuote(workspacePath)}`,
+        `if [ -z "$\{TINYAI_OBS_GIT_HOOK_TOOL:-}" ]; then TINYAI_OBS_GIT_HOOK_TOOL=${shellQuote(hookTool)}; fi`,
+        `export TINYAI_OBS_TOOL="$TINYAI_OBS_GIT_HOOK_TOOL"`,
+        `export TINYAI_OBS_HOOK_INSTALLER_TOOL=${shellQuote(options.tool)}`,
+        `export TINYAI_OBS_PLUGIN_VERSION=${shellQuote(options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0")}`
     ];
-    if (options.collectorUrl || process.env.TINYAI_OBS_COLLECTOR_URL)
-        envLines.push(`TINYAI_OBS_COLLECTOR_URL=${shellQuote(options.collectorUrl || process.env.TINYAI_OBS_COLLECTOR_URL || "")}`);
-    if (options.token || process.env.TINYAI_OBS_TOKEN)
-        envLines.push(`TINYAI_OBS_TOKEN=${shellQuote(options.token || process.env.TINYAI_OBS_TOKEN || "")}`);
-    const postCommit = `#!/bin/sh
-# TinyAI Observability: record AI-attributed code entering commits.
-${envLines.join(" ")} TINYAI_OBS_EVENT_TYPE=commit_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true
-`;
-    const prePush = `#!/bin/sh
-# TinyAI Observability: record AI-attributed branch diff before push.
-${envLines.join(" ")} TINYAI_OBS_EVENT_TYPE=push_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true
-`;
+    const setupScript = setupLines.filter(Boolean).join("; ");
+    const postCommit = managedHookBlock("record commit diff evidence for server-side AI attribution", `${setupScript}; TINYAI_OBS_EVENT_TYPE=commit_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true`);
+    const prePush = managedHookBlock("record AI-attributed branch diff before push", `${setupScript}; TINYAI_OBS_EVENT_TYPE=push_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true`);
+    const preCommitPath = join(hooksDir, "pre-commit");
     const postCommitPath = join(hooksDir, "post-commit");
     const prePushPath = join(hooksDir, "pre-push");
-    await writeFile(postCommitPath, postCommit, { mode: 0o755 });
-    await writeFile(prePushPath, prePush, { mode: 0o755 });
+    await removeManagedHook(preCommitPath);
+    await writeManagedHook(postCommitPath, postCommit);
+    await writeManagedHook(prePushPath, prePush);
     await chmod(postCommitPath, 0o755);
     await chmod(prePushPath, 0o755);
     return { installed: [postCommitPath, prePushPath], git_dir: dirname(hooksDir) };
 }
 function shellQuote(value) {
     return `'${value.replace(/'/g, "'\\''")}'`;
+}
+const TINYAI_HOOK_BEGIN = "# >>> TinyAI Observability >>>";
+const TINYAI_HOOK_END = "# <<< TinyAI Observability <<<";
+const TINYAI_HOOK_RE = new RegExp(`${escapeRegExp(TINYAI_HOOK_BEGIN)}[\\s\\S]*?${escapeRegExp(TINYAI_HOOK_END)}\\n?`, "m");
+function managedHookBlock(description, command) {
+    return `${TINYAI_HOOK_BEGIN}
+# TinyAI Observability: ${description}.
+${command}
+${TINYAI_HOOK_END}
+`;
+}
+async function writeManagedHook(hookPath, block) {
+    let existing = "";
+    try {
+        existing = await readFile(hookPath, "utf8");
+    }
+    catch {
+        existing = "";
+    }
+    let next;
+    if (TINYAI_HOOK_RE.test(existing)) {
+        next = existing.replace(TINYAI_HOOK_RE, block);
+    }
+    else if (isLegacyTinyAiHook(existing)) {
+        next = `#!/bin/sh\n${block}`;
+    }
+    else if (existing.trim()) {
+        next = existing.startsWith("#!") ? `${existing.trimEnd()}\n\n${block}` : `#!/bin/sh\n${existing.trimEnd()}\n\n${block}`;
+    }
+    else {
+        next = `#!/bin/sh\n${block}`;
+    }
+    await writeFile(hookPath, next, { mode: 0o755 });
+}
+async function removeManagedHook(hookPath) {
+    let existing = "";
+    try {
+        existing = await readFile(hookPath, "utf8");
+    }
+    catch {
+        return;
+    }
+    if (!TINYAI_HOOK_RE.test(existing) && !isLegacyTinyAiHook(existing))
+        return;
+    const next = TINYAI_HOOK_RE.test(existing) ? existing.replace(TINYAI_HOOK_RE, "") : "";
+    const normalized = next.trim();
+    if (!normalized || normalized === "#!/bin/sh") {
+        try {
+            await unlink(hookPath);
+        }
+        catch {
+            // best effort: hook removal should not block post-commit installation
+        }
+        return;
+    }
+    await writeFile(hookPath, next.endsWith("\n") ? next : `${next}\n`, { mode: 0o755 });
+}
+function isLegacyTinyAiHook(value) {
+    return value.includes("TinyAI Observability:") && value.includes("TINYAI_OBS_EVENT_TYPE=");
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

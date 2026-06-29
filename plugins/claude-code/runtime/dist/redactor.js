@@ -26,7 +26,7 @@ export function redact(value, options = {}) {
         const entries = Object.entries(value);
         const selectedEntries = options.allowFullConversationText ? entries : entries.slice(0, 80);
         for (const [key, item] of selectedEntries) {
-            output[key] = BLOCKED_KEYS.has(key.toLowerCase()) ? "[REDACTED]" : redact(item, options);
+            output[key] = BLOCKED_KEYS.has(key.toLowerCase()) && !options.allowFullConversationText ? "[REDACTED]" : redact(item, options);
         }
         return output;
     }

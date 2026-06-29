@@ -18,7 +18,11 @@ export type EventType =
   | "regenerate"
   | "interruption"
   | "adoption_snapshot"
+  | "turn_snapshot"
   | "conversation_snapshot"
+  | "agent_process_snapshot"
+  | "agent_activity"
+  | "file_read"
   | "plugin_heartbeat";
 
 export interface ObservabilityEvent {
@@ -31,13 +35,55 @@ export interface ObservabilityEvent {
   workspace_path_hash?: string;
   payload: Record<string, unknown>;
   source_confidence: SourceConfidence;
+  username: string;
+  user_id?: string;
+  user_email?: string;
+  user_display_name?: string;
+  team?: string;
+  machine_id?: string;
+  host_hash?: string;
+  model?: string;
 }
 
 export interface EventBatch {
   client_id: string;
   plugin_name: string;
   plugin_version: string;
+  username: string;
+  user_id?: string;
+  user_email?: string;
+  user_display_name?: string;
+  team?: string;
+  machine_id?: string;
+  host_hash?: string;
+  model?: string;
   events: ObservabilityEvent[];
+}
+
+export interface BatchEventResult {
+  event_id: string;
+  event_type: EventType | string;
+  status: "accepted" | "duplicate" | "failed";
+  reason?: string | null;
+}
+
+export interface BatchUploadResult {
+  accepted: number;
+  duplicates: number;
+  failed?: number;
+  task_count?: number;
+  events?: BatchEventResult[];
+  queued?: boolean;
+}
+
+export interface UserIdentity {
+  username: string;
+  user_id?: string;
+  user_email?: string;
+  user_display_name?: string;
+  team?: string;
+  machine_id?: string;
+  host_hash?: string;
 }
 
 const processTaskId = process.env.TINYAI_OBS_TASK_ID || randomUUID();
@@ -54,9 +100,67 @@ export function taskIdFromEnv(): string {
   return processTaskId;
 }
 
-export function clientId(tool: ToolName): string {
-  const seed = `${tool}:${process.env.USER || process.env.USERNAME || "unknown"}:${process.env.HOSTNAME || "local"}`;
+export function clientId(tool: ToolName, overrides: Partial<UserIdentity> = {}): string {
+  const identity = resolveUserIdentity(overrides);
+  const seed = `${tool}:${identity.user_id || identity.user_email || identity.user_display_name || identity.username}:${identity.machine_id || identity.host_hash || "local"}`;
   return createHash("sha256").update(seed).digest("hex").slice(0, 32);
+}
+
+export function resolveUsername(): string {
+  return process.env.USER || process.env.USERNAME || "unknown";
+}
+
+function clean(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeToolEnvName(tool: string | undefined): string | undefined {
+  const normalized = tool?.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized || undefined;
+}
+
+function toolEnvValue(suffix: string): string | undefined {
+  const tool = normalizeToolEnvName(process.env.TINYAI_OBS_TOOL);
+  if (tool) {
+    const value = clean(process.env[`TINYAI_OBS_${tool}_${suffix}`]);
+    if (value) return value;
+  }
+  return clean(process.env[`TINYAI_OBS_${suffix}`]);
+}
+
+export function resolveUserIdentity(overrides: Partial<UserIdentity> = {}): UserIdentity {
+  const userEmail = clean(overrides.user_email) || toolEnvValue("USER_EMAIL");
+  const userDisplayName =
+    clean(overrides.user_display_name) ||
+    toolEnvValue("USER_DISPLAY_NAME") ||
+    toolEnvValue("USER_NAME");
+  const username = clean(overrides.username) || toolEnvValue("USERNAME") || userDisplayName || resolveUsername();
+  const userId =
+    clean(overrides.user_id) ||
+    toolEnvValue("USER_ID") ||
+    userEmail ||
+    userDisplayName ||
+    username;
+  const hostname = clean(process.env.HOSTNAME) || "local";
+  return {
+    username,
+    user_id: userId,
+    user_email: userEmail,
+    user_display_name: userDisplayName,
+    team: clean(overrides.team) || clean(process.env.TINYAI_OBS_TEAM),
+    machine_id: clean(overrides.machine_id) || clean(process.env.TINYAI_OBS_MACHINE_ID),
+    host_hash: clean(overrides.host_hash) || createHash("sha256").update(hostname).digest("hex").slice(0, 32)
+  };
+}
+
+export function resolveModel(): string | undefined {
+  return (
+    process.env.TINYAI_OBS_MODEL ||
+    process.env.CLAUDE_CODE_MODEL ||
+    process.env.OPENAI_MODEL ||
+    undefined
+  );
 }
 
 export function makeEvent(input: {
@@ -68,7 +172,10 @@ export function makeEvent(input: {
   payload?: Record<string, unknown>;
   sourceConfidence?: SourceConfidence;
   eventId?: string;
+  model?: string;
+  userIdentity?: Partial<UserIdentity>;
 }): ObservabilityEvent {
+  const identity = resolveUserIdentity(input.userIdentity);
   return {
     event_id: input.eventId || randomUUID(),
     task_id: input.taskId || taskIdFromEnv(),
@@ -78,6 +185,8 @@ export function makeEvent(input: {
     occurred_at: new Date().toISOString(),
     workspace_path_hash: hashWorkspace(input.workspacePath),
     payload: input.payload || {},
-    source_confidence: input.sourceConfidence || "direct"
+    source_confidence: input.sourceConfidence || "direct",
+    ...identity,
+    model: input.model ?? resolveModel()
   };
 }

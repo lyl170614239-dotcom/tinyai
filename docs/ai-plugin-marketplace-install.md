@@ -5,7 +5,7 @@
 Git 地址：
 
 ```text
-git@github.com:lyl170614239-dotcom/tinyai.git
+https://github.com/lyl170614239-dotcom/tinyai.git
 ```
 
 ## 推荐给同事的话术
@@ -15,14 +15,14 @@ git@github.com:lyl170614239-dotcom/tinyai.git
 把下面这句话发给 Claude Code：
 
 ```text
-请从这个 Git 仓库安装 TinyAI observability 插件：git@github.com:lyl170614239-dotcom/tinyai.git。安装到 user scope，安装完成后检查插件状态是否 enabled。
+请从这个 Git 仓库安装 TinyAI observability 插件：https://github.com/lyl170614239-dotcom/tinyai.git。安装到 user scope，安装完成后检查插件状态是否 enabled。
 ```
 
 更稳的完整话术：
 
 ```text
 请从这个 Git 仓库安装 TinyAI observability 插件：
-git@github.com:lyl170614239-dotcom/tinyai.git
+https://github.com/lyl170614239-dotcom/tinyai.git
 
 我的姓名是张三，邮箱是 zhangsan@example.com。
 
@@ -45,7 +45,7 @@ git@github.com:lyl170614239-dotcom/tinyai.git
 Claude Code 应该执行的实际命令是：
 
 ```bash
-claude plugin marketplace add git@github.com:lyl170614239-dotcom/tinyai.git --scope user --sparse .claude-plugin plugins/claude-code
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user --sparse .claude-plugin plugins/claude-code
 claude plugin install observability@tinyai --scope user
 claude plugin list
 ```
@@ -57,14 +57,14 @@ claude plugin list
 把下面这句话发给 Codex：
 
 ```text
-请从这个 Git 仓库安装 TinyAI observability 插件：git@github.com:lyl170614239-dotcom/tinyai.git。安装完成后检查 observability@tinyai 是否 enabled。
+请从这个 Git 仓库安装 TinyAI observability 插件：https://github.com/lyl170614239-dotcom/tinyai.git。安装完成后检查 observability@tinyai 是否 enabled。
 ```
 
 更稳的完整话术：
 
 ```text
 请从这个 Git 仓库安装 TinyAI observability 插件：
-git@github.com:lyl170614239-dotcom/tinyai.git
+https://github.com/lyl170614239-dotcom/tinyai.git
 
 我的姓名是张三，邮箱是 zhangsan@example.com。
 
@@ -87,7 +87,7 @@ git@github.com:lyl170614239-dotcom/tinyai.git
 Codex 应该执行的实际命令是：
 
 ```bash
-codex plugin marketplace add git@github.com:lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -99,7 +99,7 @@ codex plugin list
 ## Claude Code
 
 ```bash
-claude plugin marketplace add git@github.com:lyl170614239-dotcom/tinyai.git --scope user
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user
 claude plugin install observability@tinyai --scope user
 ```
 
@@ -115,7 +115,7 @@ claude plugin update observability@tinyai
 ## Codex
 
 ```bash
-codex plugin marketplace add git@github.com:lyl170614239-dotcom/tinyai.git --ref main
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main
 codex plugin add observability@tinyai
 ```
 

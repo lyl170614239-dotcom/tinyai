@@ -1,29 +1,44 @@
 # TinyAI Observability
 
-Private VS Code extension for collecting Copilot-era coding task telemetry.
+Private VS Code extension for collecting Copilot and Claude coding task telemetry.
 
 ## Usage
 
 1. Install the private `.vsix`.
-2. Reload VS Code.
-3. Keep using Copilot Chat / Agent mode normally.
-4. The extension automatically scans local VS Code Copilot transcript files and uploads full user/assistant messages when `tinyaiObservability.captureConversationText` is enabled.
-5. In Agent mode, enable or allow the `tinyai_specs` tool. Copilot can then call the tool directly when the prompt needs personal specs.
-6. For sticky TinyAI chat, start a Copilot Chat thread with `@tinyai`; the participant is sticky, so follow-up turns in that thread do not need `@tinyai` again.
-7. Open the left-side `TinyAI` activity bar item for task controls: `Capture Copilot Local Transcripts`, `Start Task`, `Record AI Lines Snapshot`, `Record Commit Snapshot`, `Record Push/PR Snapshot`, `Install Git Hooks`, `Record Feedback`, `Record Adoption Snapshot`, `End Task`, and fallback transcript import.
-8. Click `Install Git Hooks` once per repository when you want commit/push AI code attribution to run automatically.
+2. Configure identity and collector settings once:
 
-The extension records task lifecycle events, spec/catalog file access, code
-change summaries, full conversation text for TinyAI-owned chat surfaces,
-local Copilot transcript JSONL files, clipboard/editor-imported Copilot
-transcripts, feedback, adoption snapshots, and upload retries.
+```bash
+npm run configure -- \
+  --user-name "张三"
+```
+
+3. Reload VS Code.
+4. Keep using Copilot Chat / Agent mode, Claude Code panels, or Claude CLI normally.
+5. The extension automatically scans local VS Code Copilot `chatSessions` and `GitHub.copilot-chat/transcripts` files, plus Claude `~/.claude/projects/**/*.jsonl` and `~/.claude/transcripts/*.jsonl`. Each completed user request uploads one logical `turn_snapshot`.
+6. In Agent mode, enable or allow the `tinyai_specs` tool. Copilot can then call the tool directly when the prompt needs personal specs.
+7. For sticky TinyAI chat, start a Copilot Chat thread with `@tinyai`; the participant is sticky, so follow-up turns in that thread do not need `@tinyai` again.
+8. Open the left-side `TinyAI` activity bar item only when you need setup or verification: `Open Dashboard`, `Configure User & Collector`, `Install Git Hooks`, or manual capture/flush actions.
+9. Click `Install Git Hooks` once per repository when you want commit/push AI code attribution to run automatically.
+
+Automatic Copilot capture emits one `turn_snapshot` per completed request.
+The user question and final assistant answer come from `chatSessions`; visible
+reasoning, assistant progress, tool arguments/results, and sub-agent traces
+come from `GitHub.copilot-chat/transcripts` when VS Code persists them. The
+extension no longer uploads automatic Copilot `agent_activity`, standalone
+`file_read`, or synthetic `task_start`/`task_end` events. Explicit TinyAI tasks
+still keep their lifecycle events.
+
+The extension also records spec/catalog access, code change summaries,
+feedback, commit/push attribution snapshots, and upload retries.
+Every event includes the configured `tinyaiObservability.userName` so all
+sessions from the same teammate group under one user in the dashboard.
 For AI code metrics, `git commit` records a `commit_snapshot` and `git push`
-records a `push_snapshot` after hooks are installed and a recent TinyAI AI
-activity marker exists. Normal human commits without that marker are skipped.
-For same-commit AI-vs-human line attribution, run `Record AI Lines Snapshot`
-after Copilot-generated edits and before committing. Lines without a prior AI
-line snapshot are treated as human. Snapshot events use stable IDs based on the
-commit SHA or push range, so repeated runs do not double count the same code.
+records a `push_snapshot` after hooks are installed. The collector compares the
+commit diff against prior Copilot/Claude AI code evidence in the database to
+classify AI-current, human-current, and AI-assisted human-edited lines. Users do
+not need to click a manual "mark current diff" button. Snapshot events use
+stable IDs based on the commit SHA or push range, so repeated runs do not double
+count the same code.
 
 Regular Copilot Chat is captured from local VS Code workspace transcript files:
 
@@ -32,9 +47,13 @@ $HOME/Library/Application Support/Code/User/workspaceStorage/<hash>/GitHub.copil
 $HOME/Library/Application Support/Code/User/workspaceStorage/<hash>/chatSessions/*.jsonl
 ```
 
-Those records include user and assistant message text when VS Code persists
-them. They are marked `derived` because the extension reads local persisted
-files rather than receiving a first-party Copilot Chat event. Direct capture
-still comes from the sticky `@tinyai` participant and the `tinyai_specs`
-Agent-mode tool. Inline completions are not per-suggestion exact; code adoption
-is estimated from task-window diffs and retention snapshots.
+Those records include only content VS Code/Copilot persisted locally. Hidden
+model chain-of-thought is not available; `visible_reasoning` is limited to
+reasoning text present in the files. Non-localhost collectors must use HTTPS
+and a bearer token. Localhost may use HTTP. Direct capture still comes from the
+sticky `@tinyai` participant and the `tinyai_specs` Agent-mode tool.
+
+Claude capture is separate from Copilot model selection. If Claude is selected
+inside GitHub Copilot Chat, the source is still Copilot and the event tool is
+`copilot` with a Claude model name. Native Claude Code / Claude CLI / Claude
+panel JSONL logs are uploaded as `tool=claude`.

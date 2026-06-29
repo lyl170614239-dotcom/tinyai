@@ -1,10 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import field_serializer
+
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def beijing_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=BEIJING_TZ)
+    else:
+        value = value.astimezone(BEIJING_TZ)
+    return value.isoformat()
 
 
 class PullRequestAttributionOut(BaseModel):
@@ -34,3 +48,7 @@ class PullRequestAttributionOut(BaseModel):
     attribution_method: str
     confidence: str
     occurred_at: datetime
+
+    @field_serializer("occurred_at")
+    def serialize_occurred_at(self, value: datetime) -> str:
+        return beijing_iso(value) or ""

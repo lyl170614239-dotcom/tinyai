@@ -173,7 +173,7 @@ Command Palette -> Developer: Reload Window
 Claude Code：
 
 ```bash
-claude plugin marketplace add git@github.com:lyl170614239-dotcom/tinyai.git --scope user --sparse .claude-plugin plugins/claude-code
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user --sparse .claude-plugin plugins/claude-code
 claude plugin install observability@tinyai --scope user
 ```
 
@@ -181,7 +181,7 @@ claude plugin install observability@tinyai --scope user
 
 ```text
 请从这个 Git 仓库安装 TinyAI observability 插件：
-git@github.com:lyl170614239-dotcom/tinyai.git
+https://github.com/lyl170614239-dotcom/tinyai.git
 
 我的姓名是张三，邮箱是 zhangsan@example.com。
 
@@ -204,7 +204,7 @@ git@github.com:lyl170614239-dotcom/tinyai.git
 Codex：
 
 ```bash
-codex plugin marketplace add git@github.com:lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
 codex plugin add observability@tinyai
 ```
 
@@ -212,7 +212,7 @@ codex plugin add observability@tinyai
 
 ```text
 请从这个 Git 仓库安装 TinyAI observability 插件：
-git@github.com:lyl170614239-dotcom/tinyai.git
+https://github.com/lyl170614239-dotcom/tinyai.git
 
 我的姓名是张三，邮箱是 zhangsan@example.com。
 

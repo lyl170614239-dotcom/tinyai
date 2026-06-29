@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -13,7 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..models import AgentEvent, PullRequestAttribution
+from ..models import AiCodeChange, PullRequestAttribution
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class GitHubWebhookError(Exception):
@@ -48,15 +50,21 @@ def _int(value: Any, default: int = 0) -> int:
     return default
 
 
-def _payload(event: AgentEvent) -> dict[str, Any]:
-    return event.payload if isinstance(event.payload, dict) else {}
+def _change_payload(change: AiCodeChange) -> dict[str, Any]:
+    if isinstance(change.diff_json, dict):
+        return change.diff_json
+    return {}
+
+
+def _local_now() -> datetime:
+    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
 
 def _commit_snapshot_index(db: Session) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
-    events = db.execute(select(AgentEvent).where(AgentEvent.event_type == "commit_snapshot")).scalars().all()
-    for event in events:
-        payload = _payload(event)
+    changes = db.execute(select(AiCodeChange).where(AiCodeChange.change_type == "commit_snapshot")).scalars().all()
+    for change in changes:
+        payload = _change_payload(change)
         sha = str(payload.get("commit_sha") or "")
         if not sha:
             continue
@@ -64,8 +72,8 @@ def _commit_snapshot_index(db: Session) -> dict[str, dict[str, Any]]:
             continue
         current = index.get(sha) or {"ai_lines_added": 0, "ai_lines_deleted": 0, "files_changed": 0, "line_attribution": None}
         index[sha] = {
-            "ai_lines_added": max(current["ai_lines_added"], _int(payload.get("ai_lines_added"), _int(payload.get("lines_added")))),
-            "ai_lines_deleted": max(current["ai_lines_deleted"], _int(payload.get("ai_lines_deleted"), _int(payload.get("lines_deleted")))),
+            "ai_lines_added": max(current["ai_lines_added"], _int(payload.get("ai_lines_added"), change.lines_added)),
+            "ai_lines_deleted": max(current["ai_lines_deleted"], _int(payload.get("ai_lines_deleted"), change.lines_deleted)),
             "files_changed": max(current["files_changed"], _int(payload.get("files_changed"))),
             "human_lines_added": _int(payload.get("human_lines_added")),
             "line_attribution": payload.get("line_attribution") if isinstance(payload.get("line_attribution"), dict) else current.get("line_attribution"),
@@ -201,7 +209,7 @@ def process_pull_request_webhook(db: Session, payload: dict[str, Any], delivery_
         unmatched_commit_shas={"commits": unmatched[:250], "truncated": len(unmatched) > 250},
         attribution_method="pr_commit_snapshot_intersection",
         confidence="derived",
-        occurred_at=datetime.utcnow(),
+        occurred_at=_local_now(),
     )
 
     existing = db.execute(select(PullRequestAttribution).where(PullRequestAttribution.delivery_id == delivery_id)).scalar_one_or_none()
