@@ -1,27 +1,29 @@
 {
   "name": "tinyai-observability-copilot",
   "displayName": "TinyAI Observability",
-  "description": "Native VS Code extension for Copilot-era TinyAI coding telemetry.",
-  "version": "0.1.8",
+  "description": "Native VS Code extension for Copilot/Claude TinyAI coding telemetry.",
+  "version": "0.1.39",
   "publisher": "tinyai",
   "private": true,
   "type": "module",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onStartupFinished",
     "onView:tinyaiObservability.actionsView",
     "onCommand:tinyaiObservability.openPanel",
     "onCommand:tinyaiObservability.showMenu",
+    "onCommand:tinyaiObservability.configure",
+    "onCommand:tinyaiObservability.openDashboard",
     "onCommand:tinyaiObservability.captureCopilotLocalTranscripts",
-    "onCommand:tinyaiObservability.captureActiveEditorConversation",
-    "onCommand:tinyaiObservability.captureClipboardConversation",
+    "onCommand:tinyaiObservability.captureClaudeLocalTranscripts",
     "onCommand:tinyaiObservability.recordAiLinesSnapshot",
-    "onCommand:tinyaiObservability.recordCommitSnapshot",
-    "onCommand:tinyaiObservability.recordPushSnapshot",
-    "onCommand:tinyaiObservability.installGitHooks"
+    "onCommand:tinyaiObservability.installGitHooks",
+    "onCommand:tinyaiObservability.recordFeedback"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -48,23 +50,69 @@
       "properties": {
         "tinyaiObservability.collectorUrl": {
           "type": "string",
-          "default": "http://localhost:18080",
-          "description": "TinyAI observability collector URL."
+          "default": "http://10.161.248.133:18080",
+          "description": "TinyAI observability collector URL. Localhost and private LAN IPs may use HTTP for team testing; public collectors must use HTTPS with a bearer token."
         },
         "tinyaiObservability.token": {
           "type": "string",
-          "default": "dev-token",
-          "description": "Collector bearer token."
+          "default": "",
+          "description": "Collector bearer token. Required for public collectors; localhost and private LAN collectors may use HTTP without a token."
+        },
+        "tinyaiObservability.userName": {
+          "type": "string",
+          "default": "",
+          "description": "Required teammate display name used to group all sessions for the same user in TinyAI Observability."
+        },
+        "tinyaiObservability.userId": {
+          "type": "string",
+          "default": "",
+          "description": "Optional stable teammate ID. If empty, TinyAI uses userEmail, then userName."
+        },
+        "tinyaiObservability.userEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Optional teammate email used for identity disambiguation."
+        },
+        "tinyaiObservability.team": {
+          "type": "string",
+          "default": "",
+          "description": "Optional team or group name for reporting."
         },
         "tinyaiObservability.captureConversationText": {
           "type": "boolean",
           "default": true,
-          "description": "Capture full conversation text for TinyAI-owned chat surfaces and imported Copilot transcripts."
+          "description": "Capture full conversation text for TinyAI-owned chat surfaces and imported Copilot/Claude transcripts."
+        },
+        "tinyaiObservability.captureVisibleReasoningText": {
+          "type": "boolean",
+          "default": false,
+          "description": "Capture visible or locally persisted AI reasoning/process text from Copilot/Claude transcripts. turn_snapshot stores only reasoning text actually persisted by the local AI tool."
         },
         "tinyaiObservability.autoCaptureCopilotLocalTranscripts": {
           "type": "boolean",
           "default": true,
           "description": "Automatically capture local GitHub Copilot Chat transcript JSONL files from VS Code workspaceStorage."
+        },
+        "tinyaiObservability.autoCaptureClaudeLocalTranscripts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically capture local Claude Code project JSONL files from ~/.claude/projects and ~/.claude/transcripts. Captures Claude turns from VS Code Claude panels, Claude Code, and Claude CLI when those logs are written locally."
+        },
+        "tinyaiObservability.autoCaptureCopilotCodeChanges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically capture per-turn code changes from Copilot tool-call edit payloads and VS Code text document changes. This excludes pre-existing workspace git diff."
+        },
+        "tinyaiObservability.autoInstallGitHooks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically install or refresh non-destructive TinyAI Git hooks for AI line fingerprints, commit snapshots, and push snapshots when a Git workspace opens."
+        },
+        "tinyaiObservability.autoCaptureRecentMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "description": "Only auto-capture Copilot/Claude transcript files modified within this many minutes. This keeps startup scans focused on recent work instead of backfilling old chats."
         }
       }
     },
@@ -93,7 +141,11 @@
     "languageModelTools": [
       {
         "name": "tinyai_specs",
-        "tags": ["tinyai", "specs", "observability"],
+        "tags": [
+          "tinyai",
+          "specs",
+          "observability"
+        ],
         "toolReferenceName": "tinyai_specs",
         "displayName": "TinyAI Specs",
         "modelDescription": "Search TinyAI/OpenSpec personal specs and catalog for relevant project rules. Use this before coding when the user mentions personal specs, specs, OpenSpec, project knowledge, catalog, workspace rules, official-vs-personal spec differences, or domain logic that may be documented in the knowledge base. The tool also records direct specs telemetry for observability.",
@@ -108,7 +160,9 @@
               "description": "The user's coding or analysis request to search in TinyAI/OpenSpec specs."
             }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         }
       }
     ],
@@ -124,66 +178,11 @@
       {
         "command": "tinyaiObservability.showMenu",
         "title": "TinyAI Observability: Show Menu"
-      },
-      {
-        "command": "tinyaiObservability.openDashboard",
-        "title": "TinyAI Observability: Open Dashboard"
-      },
-      {
-        "command": "tinyaiObservability.startTask",
-        "title": "TinyAI Observability: Start Task"
-      },
-      {
-        "command": "tinyaiObservability.endTask",
-        "title": "TinyAI Observability: End Task"
-      },
-      {
-        "command": "tinyaiObservability.flushEvents",
-        "title": "TinyAI Observability: Flush Events"
-      },
-      {
-        "command": "tinyaiObservability.captureClipboardConversation",
-        "title": "TinyAI Observability: Capture Clipboard Conversation"
-      },
-      {
-        "command": "tinyaiObservability.captureActiveEditorConversation",
-        "title": "TinyAI Observability: Capture Active Editor Conversation"
-      },
-      {
-        "command": "tinyaiObservability.captureCopilotLocalTranscripts",
-        "title": "TinyAI Observability: Capture Copilot Local Transcripts"
-      },
-      {
-        "command": "tinyaiObservability.recordAiLinesSnapshot",
-        "title": "TinyAI Observability: Record AI Lines Snapshot"
-      },
-      {
-        "command": "tinyaiObservability.recordCommitSnapshot",
-        "title": "TinyAI Observability: Record Commit Snapshot"
-      },
-      {
-        "command": "tinyaiObservability.recordPushSnapshot",
-        "title": "TinyAI Observability: Record Push/PR Snapshot"
-      },
-      {
-        "command": "tinyaiObservability.installGitHooks",
-        "title": "TinyAI Observability: Install Git Hooks"
-      },
-      {
-        "command": "tinyaiObservability.recordFeedback",
-        "title": "TinyAI Observability: Record Feedback"
-      },
-      {
-        "command": "tinyaiObservability.adoptionSnapshot",
-        "title": "TinyAI Observability: Record Adoption Snapshot"
-      },
-      {
-        "command": "tinyaiObservability.showCurrentTask",
-        "title": "TinyAI Observability: Show Current Task"
       }
     ]
   },
   "scripts": {
+    "configure": "node scripts/configure.mjs",
     "compile": "npm run typecheck && node esbuild.mjs",
     "typecheck": "tsc -p ./ --noEmit",
     "package": "npm run compile && npx vsce package --allow-missing-repository"

@@ -1,0 +1,31 @@
+export type TinyAiToolName = "copilot" | "claude" | "codex" | string;
+export declare const DEFAULT_TINYAI_ENV_FILE: string;
+export declare const DEFAULT_COLLECTOR_URL = "http://10.161.248.133:18080";
+export declare const DEFAULT_COLLECTOR_FALLBACK_URLS: string[];
+export declare const DEFAULT_DASHBOARD_URL = "http://10.161.248.133:18081";
+export declare const DEFAULT_DASHBOARD_FALLBACK_URLS: string[];
+export type TinyAiEnv = Record<string, string>;
+export declare function parseTinyAiEnv(content: string): TinyAiEnv;
+export declare function resolveTinyAiEnvFile(workspacePath?: string): string;
+export declare function readTinyAiEnvFile(workspacePath?: string): {
+    path: string;
+    values: TinyAiEnv;
+    exists: boolean;
+};
+export declare function loadTinyAiEnvFile(workspacePath?: string): {
+    path: string;
+    values: TinyAiEnv;
+    exists: boolean;
+};
+export declare function tinyAiEnvValue(key: string, workspacePath?: string): string | undefined;
+export declare function tinyAiToolEnvValue(tool: TinyAiToolName | undefined, suffix: string, workspacePath?: string): string | undefined;
+export declare function splitTinyAiUrls(value: string | undefined): string[];
+export declare function tinyAiCollectorUrl(workspacePath?: string): string;
+export declare function tinyAiCollectorUrlForTool(tool?: TinyAiToolName, workspacePath?: string): string;
+export declare function tinyAiCollectorFallbackUrls(workspacePath?: string): string[];
+export declare function tinyAiCollectorFallbackUrlsForTool(tool?: TinyAiToolName, workspacePath?: string): string[];
+export declare function tinyAiDashboardUrl(workspacePath?: string): string;
+export declare function tinyAiDashboardUrlForTool(tool?: TinyAiToolName, workspacePath?: string): string;
+export declare function tinyAiDashboardFallbackUrls(workspacePath?: string): string[];
+export declare function tinyAiDashboardFallbackUrlsForTool(tool?: TinyAiToolName, workspacePath?: string): string[];
+export declare function tinyAiQueuePathForTool(tool?: TinyAiToolName, workspacePath?: string): string;
