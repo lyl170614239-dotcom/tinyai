@@ -33,13 +33,20 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 然后必须配置身份，不要直接结束：
 1. 如果我在这条消息里已经写了姓名/邮箱，直接写入 ~/.tinyai-observability/tinyai-observability.env，不要再反复问。
 2. 如果我没写姓名/邮箱，或者你无法判断，再询问我。
-3. 字段必须使用 Claude 专属前缀：
+3. 字段必须同时写通用 TinyAI 身份和 Claude 专属身份：
+   TINYAI_OBS_USER_NAME
+   TINYAI_OBS_USER_DISPLAY_NAME
+   TINYAI_OBS_USERNAME
+   TINYAI_OBS_USER_EMAIL
+   TINYAI_OBS_USER_ID
    TINYAI_OBS_CLAUDE_USER_NAME
    TINYAI_OBS_CLAUDE_USER_DISPLAY_NAME
    TINYAI_OBS_CLAUDE_USERNAME
    TINYAI_OBS_CLAUDE_USER_EMAIL
    TINYAI_OBS_CLAUDE_USER_ID
-4. 最后提示我重启 Claude Code 或重新打开 VS Code Claude Code 面板。
+4. 配置身份后必须自动跑 collector smoke test：先请求 /api/v1/health，再向 /api/v1/events/batch 发送一条 tool=claude 的 plugin_heartbeat。
+5. 如果 smoke test 失败，不要说安装完成，要明确告诉我失败的 collector 地址和错误。
+6. smoke test 成功后，最后提示我重启 Claude Code 或重新打开 VS Code Claude Code 面板。
 ```
 
 Claude Code 应该执行的实际命令是：
@@ -75,13 +82,20 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 然后必须配置身份，不要直接结束：
 1. 如果我在这条消息里已经写了姓名/邮箱，直接写入 ~/.tinyai-observability/tinyai-observability.env，不要再反复问。
 2. 如果我没写姓名/邮箱，或者你无法判断，再读取 git config --global user.name 和 git config --global user.email，并询问我是否使用检测到的姓名/邮箱。
-3. 把确认后的身份写入 ~/.tinyai-observability/tinyai-observability.env，字段必须使用 Codex 专属前缀：
+3. 把确认后的身份写入 ~/.tinyai-observability/tinyai-observability.env，字段必须同时写通用 TinyAI 身份和 Codex 专属身份：
+   TINYAI_OBS_USER_NAME
+   TINYAI_OBS_USER_DISPLAY_NAME
+   TINYAI_OBS_USERNAME
+   TINYAI_OBS_USER_EMAIL
+   TINYAI_OBS_USER_ID
    TINYAI_OBS_CODEX_USER_NAME
    TINYAI_OBS_CODEX_USER_DISPLAY_NAME
    TINYAI_OBS_CODEX_USERNAME
    TINYAI_OBS_CODEX_USER_EMAIL
    TINYAI_OBS_CODEX_USER_ID
-4. 最后提示我重启 Codex 或打开新会话。
+4. 配置身份后必须自动跑 collector smoke test：先请求 /api/v1/health，再向 /api/v1/events/batch 发送一条 tool=codex 的 plugin_heartbeat。
+5. 如果 smoke test 失败，不要说安装完成，要明确告诉我失败的 collector 地址和错误。
+6. smoke test 成功后，最后提示我重启 Codex 或打开新会话。
 ```
 
 Codex 应该执行的实际命令是：
