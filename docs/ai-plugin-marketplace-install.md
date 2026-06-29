@@ -15,38 +15,19 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 把下面这句话发给 Claude Code：
 
 ```text
-请从这个 Git 仓库安装 TinyAI observability 插件：https://github.com/lyl170614239-dotcom/tinyai.git。安装到 user scope，安装完成后检查插件状态是否 enabled。
-```
-
-更稳的完整话术：
-
-```text
 请从这个 Git 仓库安装 TinyAI observability 插件：
 https://github.com/lyl170614239-dotcom/tinyai.git
 
 我的姓名是张三，邮箱是 zhangsan@example.com。
 
-这是 Claude Code 插件，插件名是 observability@tinyai，安装到 user scope。
-请优先用 Claude plugin marketplace 安装；如果支持 sparse，就只拉 .claude-plugin 和 plugins/claude-code。
-安装完成后运行 claude plugin list，确认 observability@tinyai enabled。
+这是 Claude Code 插件，插件名是 observability@tinyai。
+安装完成后请自动验证：
+1. observability@tinyai 已启用
+2. collector 可以连通
+3. 成功上报一条 tool=claude 的测试心跳
 
-然后必须配置身份，不要直接结束：
-1. 如果我在这条消息里已经写了姓名/邮箱，直接写入 ~/.tinyai-observability/tinyai-observability.env，不要再反复问。
-2. 如果我没写姓名/邮箱，或者你无法判断，再询问我。
-3. 字段必须同时写通用 TinyAI 身份和 Claude 专属身份：
-   TINYAI_OBS_USER_NAME
-   TINYAI_OBS_USER_DISPLAY_NAME
-   TINYAI_OBS_USERNAME
-   TINYAI_OBS_USER_EMAIL
-   TINYAI_OBS_USER_ID
-   TINYAI_OBS_CLAUDE_USER_NAME
-   TINYAI_OBS_CLAUDE_USER_DISPLAY_NAME
-   TINYAI_OBS_CLAUDE_USERNAME
-   TINYAI_OBS_CLAUDE_USER_EMAIL
-   TINYAI_OBS_CLAUDE_USER_ID
-4. 配置身份后必须自动跑 collector smoke test：先请求 /api/v1/health，再向 /api/v1/events/batch 发送一条 tool=claude 的 plugin_heartbeat。
-5. 如果 smoke test 失败，不要说安装完成，要明确告诉我失败的 collector 地址和错误。
-6. smoke test 成功后，最后提示我重启 Claude Code 或重新打开 VS Code Claude Code 面板。
+如果验证失败，请直接告诉我失败原因。
+验证成功后，提醒我重启 Claude Code 或重新打开 VS Code Claude Code 面板。
 ```
 
 Claude Code 应该执行的实际命令是：
@@ -64,38 +45,19 @@ claude plugin list
 把下面这句话发给 Codex：
 
 ```text
-请从这个 Git 仓库安装 TinyAI observability 插件：https://github.com/lyl170614239-dotcom/tinyai.git。安装完成后检查 observability@tinyai 是否 enabled。
-```
-
-更稳的完整话术：
-
-```text
 请从这个 Git 仓库安装 TinyAI observability 插件：
 https://github.com/lyl170614239-dotcom/tinyai.git
 
 我的姓名是张三，邮箱是 zhangsan@example.com。
 
 这是 Codex 插件，插件名是 observability@tinyai。
-请优先用 Codex plugin marketplace 安装；如果支持 sparse，就只拉 .agents/plugins。
-安装完成后运行 codex plugin list，确认 observability@tinyai enabled。
+安装完成后请自动验证：
+1. observability@tinyai 已启用
+2. collector 可以连通
+3. 成功上报一条 tool=codex 的测试心跳
 
-然后必须配置身份，不要直接结束：
-1. 如果我在这条消息里已经写了姓名/邮箱，直接写入 ~/.tinyai-observability/tinyai-observability.env，不要再反复问。
-2. 如果我没写姓名/邮箱，或者你无法判断，再读取 git config --global user.name 和 git config --global user.email，并询问我是否使用检测到的姓名/邮箱。
-3. 把确认后的身份写入 ~/.tinyai-observability/tinyai-observability.env，字段必须同时写通用 TinyAI 身份和 Codex 专属身份：
-   TINYAI_OBS_USER_NAME
-   TINYAI_OBS_USER_DISPLAY_NAME
-   TINYAI_OBS_USERNAME
-   TINYAI_OBS_USER_EMAIL
-   TINYAI_OBS_USER_ID
-   TINYAI_OBS_CODEX_USER_NAME
-   TINYAI_OBS_CODEX_USER_DISPLAY_NAME
-   TINYAI_OBS_CODEX_USERNAME
-   TINYAI_OBS_CODEX_USER_EMAIL
-   TINYAI_OBS_CODEX_USER_ID
-4. 配置身份后必须自动跑 collector smoke test：先请求 /api/v1/health，再向 /api/v1/events/batch 发送一条 tool=codex 的 plugin_heartbeat。
-5. 如果 smoke test 失败，不要说安装完成，要明确告诉我失败的 collector 地址和错误。
-6. smoke test 成功后，最后提示我重启 Codex 或打开新会话。
+如果验证失败，请直接告诉我失败原因。
+验证成功后，提醒我重启 Codex 或打开新会话。
 ```
 
 Codex 应该执行的实际命令是：
