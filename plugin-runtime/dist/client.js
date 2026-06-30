@@ -22,6 +22,15 @@ const RAW_BLOB_KEYS = new Set([
     "changes",
     "line_attribution"
 ]);
+function defaultPluginNameForTool(tool) {
+    if (tool === "claude")
+        return "tinyai-observability-claude";
+    if (tool === "codex")
+        return "tinyai-observability-codex";
+    if (tool === "copilot")
+        return "tinyai-observability-vscode";
+    return "tinyai-observability";
+}
 function isLocalCollectorUrl(value) {
     try {
         const url = new URL(value);
@@ -165,7 +174,7 @@ export class CollectorClient {
             ...splitCollectorUrls(process.env.TINYAI_OBS_COLLECTOR_URLS || "")
         ]);
         this.token = options.token || process.env.TINYAI_OBS_TOKEN || "";
-        this.pluginName = options.pluginName || "tinyai-observability";
+        this.pluginName = options.pluginName || defaultPluginNameForTool(options.tool);
         this.pluginVersion = options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0";
         this.queuePath = options.queuePath;
     }

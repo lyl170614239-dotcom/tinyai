@@ -51,6 +51,15 @@ test("Codex replay ignores empty event messages and binds the requested session 
   assert.ok(snapshot.process_steps?.every((step) => step.step_id));
 });
 
+test("Codex replay uses the rollout file UUID as the stable session id when session_meta is absent", async () => {
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    sessionFile: resolve("tests/fixtures/rollout-2026-06-30T00-17-37-019f142c-088a-7ac2-9401-c7a425c16d90.jsonl")
+  });
+
+  assert.equal(snapshot.session_id, "019f142c-088a-7ac2-9401-c7a425c16d90");
+});
+
 test("Codex replay derives code edits from apply_patch input", async () => {
   const snapshot = await captureLatestCodexConversation({
     includeText: true,

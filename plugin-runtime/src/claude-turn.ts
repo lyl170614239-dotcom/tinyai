@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 
 import { stableEventId } from "./event-schema.js";
 
@@ -18,7 +18,7 @@ type ClaudeMessage = {
 
 type ClaudeProcessStep = {
   step_id: string;
-  step_type: "assistant_progress" | "visible_reasoning" | "tool_call" | "tool_result" | "error";
+  step_type: "assistant_progress" | "visible_reasoning" | "tool_call" | "tool_result" | "context" | "error";
   text?: string;
   text_hash?: string;
   source: "claude_project_jsonl";
@@ -28,7 +28,7 @@ type ClaudeProcessStep = {
   status?: string;
   occurred_at?: string;
   actor_path: "top";
-  actor_type: "assistant";
+  actor_type: "assistant" | "system";
 };
 
 type ClaudeToolCall = {
@@ -142,13 +142,30 @@ export type ClaudeTurnSnapshot = {
       sha256?: string;
       mtime_ms?: number;
       size_bytes?: number;
+      read_offset?: number;
+      next_offset?: number;
+      hash_scope?: "full_file" | "read_segment";
     };
     parser_version: string;
     capture_limitations: string;
   };
 };
 
-export const CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.2";
+export const CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.3";
+const JSONL_READ_CHUNK_BYTES = 1024 * 1024;
+const CLAUDE_NON_PROMPT_TAGS = [
+  "system-reminder",
+  "ide_opened_file",
+  "ide_selection",
+  "selected_text",
+  "ide_context",
+  "editor_context"
+];
+const CLAUDE_NON_PROMPT_TAG_RE = new RegExp(
+  `<(${CLAUDE_NON_PROMPT_TAGS.join("|")})(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1>`,
+  "gi"
+);
+const CLAUDE_CONTEXT_TAG_RE = /<(ide_opened_file|ide_selection|selected_text|ide_context|editor_context)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/gi;
 
 function record(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : undefined;
@@ -168,6 +185,80 @@ function hashText(value: string): string {
 
 function hashJson(value: unknown): string {
   return hashText(JSON.stringify(value ?? null));
+}
+
+function stripClaudeNonPromptContext(value: string): string {
+  return value.replace(CLAUDE_NON_PROMPT_TAG_RE, "").trim();
+}
+
+function claudeContextStepsFromContent(content: unknown, requestId: string, occurredAt?: string): ClaudeProcessStep[] {
+  const steps: ClaudeProcessStep[] = [];
+  for (const part of array(content)) {
+    const blockText =
+      typeof part === "string"
+        ? part
+        : record(part)?.type === "text"
+          ? cleanString(record(part)?.text) || ""
+          : "";
+    if (!blockText) continue;
+    for (const match of blockText.matchAll(CLAUDE_CONTEXT_TAG_RE)) {
+      const sourceType = match[1];
+      const rawText = (match[2] || "").trim();
+      if (!rawText) continue;
+      const label =
+        sourceType === "ide_opened_file"
+          ? `IDE 当前文件：${rawText}`
+          : sourceType === "selected_text" || sourceType === "ide_selection"
+            ? `IDE 选区上下文：${rawText}`
+            : `IDE 上下文：${rawText}`;
+      steps.push({
+        step_id: hashText(`${requestId}:context:${sourceType}:${hashText(rawText)}`).slice(0, 32),
+        step_type: "context",
+        text: label,
+        text_hash: hashText(label),
+        source: "claude_project_jsonl",
+        source_event_type: sourceType,
+        status: "complete",
+        occurred_at: occurredAt,
+        actor_path: "top",
+        actor_type: "system"
+      });
+    }
+  }
+  return steps;
+}
+
+async function readJsonlSegment(filePath: string, startOffset = 0): Promise<{ raw: string; mtimeMs: number; size: number; startOffset: number; nextOffset: number }> {
+  const st = await stat(filePath);
+  const safeOffset = startOffset > 0 && startOffset <= st.size ? startOffset : 0;
+  function completeSegment(raw: string) {
+    const lastNewline = raw.lastIndexOf("\n");
+    if (lastNewline < 0) return { raw: "", nextOffset: safeOffset };
+    const completeRaw = raw.slice(0, lastNewline + 1);
+    return { raw: completeRaw, nextOffset: safeOffset + Buffer.byteLength(completeRaw, "utf8") };
+  }
+  if (safeOffset === 0) {
+    const segment = completeSegment(await readFile(filePath, "utf8"));
+    return { raw: segment.raw, mtimeMs: st.mtimeMs, size: st.size, startOffset: 0, nextOffset: segment.nextOffset };
+  }
+
+  const handle = await open(filePath, "r");
+  const chunks: Buffer[] = [];
+  let position = safeOffset;
+  try {
+    while (position < st.size) {
+      const length = Math.min(JSONL_READ_CHUNK_BYTES, st.size - position);
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      if (bytesRead <= 0) break;
+      chunks.push(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  const segment = completeSegment(Buffer.concat(chunks).toString("utf8"));
+  return { raw: segment.raw, mtimeMs: st.mtimeMs, size: st.size, startOffset: safeOffset, nextOffset: segment.nextOffset };
 }
 
 function isoTimestamp(value: unknown): string | undefined {
@@ -190,14 +281,16 @@ function isRealUserPrompt(entry: JsonRecord): boolean {
           return typeof part === "string" || block?.type === "text";
         });
   if (!hasUserText) return false;
-  const text = textFromClaudeContent(content, { excludeToolBlocks: true, excludeSystemReminder: true }).trim();
+  const text = textFromClaudeContent(content, { excludeToolBlocks: true, excludeSystemReminder: true, excludeContext: true }).trim();
   if (!text) return false;
   if (/^\[Request interrupted by user/i.test(text)) return false;
   return true;
 }
 
-function textFromClaudeContent(content: unknown, options: { excludeToolBlocks?: boolean; excludeSystemReminder?: boolean; excludeThinking?: boolean } = {}): string {
-  if (typeof content === "string") return content;
+function textFromClaudeContent(content: unknown, options: { excludeToolBlocks?: boolean; excludeSystemReminder?: boolean; excludeContext?: boolean; excludeThinking?: boolean } = {}): string {
+  if (typeof content === "string") {
+    return options.excludeSystemReminder || options.excludeContext ? stripClaudeNonPromptContext(content) : content;
+  }
   return array(content)
     .map((part) => {
       if (typeof part === "string") return part;
@@ -208,8 +301,8 @@ function textFromClaudeContent(content: unknown, options: { excludeToolBlocks?: 
       if (type === "thinking") return options.excludeThinking ? "" : cleanString(block.thinking) || "";
       if (type === "text") {
         const text = cleanString(block.text) || "";
-        if (options.excludeSystemReminder && /<system-reminder>[\s\S]*?<\/system-reminder>/i.test(text)) {
-          return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "").trim();
+        if (options.excludeSystemReminder || options.excludeContext) {
+          return stripClaudeNonPromptContext(text);
         }
         return text;
       }
@@ -225,7 +318,8 @@ function textFromEntry(entry: JsonRecord): string {
   const message = record(entry.message);
   return textFromClaudeContent(message?.content, {
     excludeToolBlocks: true,
-    excludeSystemReminder: true
+    excludeSystemReminder: true,
+    excludeContext: true
   });
 }
 
@@ -234,6 +328,7 @@ function assistantTextFromEntry(entry: JsonRecord): string {
   return textFromClaudeContent(message?.content, {
     excludeToolBlocks: true,
     excludeSystemReminder: true,
+    excludeContext: true,
     excludeThinking: true
   });
 }
@@ -383,6 +478,8 @@ type WorkingTurn = {
   sessionId: string;
   turnIndex: number;
   requestId: string;
+  startOffset: number;
+  endOffset: number;
   userText: string;
   userAt?: string;
   userKey: string;
@@ -585,6 +682,10 @@ function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeT
       occurred_at: turn.completedAt
     }
   ];
+  const turnSourceInfo = {
+    ...sourceInfo,
+    next_offset: turn.status === "incomplete" ? turn.startOffset : turn.endOffset
+  };
   return {
     schema_version: "claude.turn_snapshot.v1",
     session_id: turn.sessionId,
@@ -639,7 +740,7 @@ function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeT
       completed_at: turn.completedAt
     },
     source_files: {
-      claude_project_jsonl: sourceInfo,
+      claude_project_jsonl: turnSourceInfo,
       parser_version: CLAUDE_TURN_PARSER_VERSION,
       capture_limitations:
         "Captured from Claude Code project JSONL. Visible thinking and tool calls are included when present. Hidden model reasoning is not available. Bash-created file diffs are only attributable when Claude logs explicit edit/write tool arguments."
@@ -648,30 +749,39 @@ function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeT
 }
 
 export async function captureLatestClaudeTurnSnapshots(
-  options: { includeText?: boolean; sessionFile?: string; sessionId?: string; workspacePath?: string; latestOnly?: boolean } = {}
+  options: { includeText?: boolean; sessionFile?: string; sessionId?: string; workspacePath?: string; latestOnly?: boolean; startOffset?: number } = {}
 ): Promise<ClaudeTurnSnapshot[]> {
   const file = await latestClaudeProjectFile(options);
   if (!file) throw new Error("No Claude Code JSONL file found under ~/.claude/projects or ~/.claude/transcripts");
   const filePath = file;
-  const raw = await readFile(filePath, "utf8");
-  const st = await stat(filePath);
+  const segment = await readJsonlSegment(filePath, options.startOffset);
   const sourceInfo = {
     path: filePath.replace(homedir(), "~"),
-    sha256: hashText(raw),
-    mtime_ms: st.mtimeMs,
-    size_bytes: st.size
+    sha256: hashText(segment.raw),
+    mtime_ms: segment.mtimeMs,
+    size_bytes: segment.size,
+    read_offset: segment.startOffset,
+    next_offset: segment.nextOffset,
+    hash_scope: segment.startOffset > 0 ? "read_segment" as const : "full_file" as const
   };
-  const entries: JsonRecord[] = raw
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line) as JsonRecord;
-      } catch {
-        return undefined;
-      }
-    })
-    .filter((entry): entry is JsonRecord => Boolean(entry));
+  const entries: Array<{ entry: JsonRecord; lineStartOffset: number; lineEndOffset: number }> = [];
+  let lineOffset = segment.startOffset;
+  for (const rawLine of segment.raw.match(/[^\n]*\n/g) || []) {
+    const lineStartOffset = lineOffset;
+    const lineEndOffset = lineStartOffset + Buffer.byteLength(rawLine, "utf8");
+    lineOffset = lineEndOffset;
+    const line = rawLine.replace(/\r?\n$/, "");
+    if (!line) continue;
+    try {
+      entries.push({
+        entry: JSON.parse(line) as JsonRecord,
+        lineStartOffset,
+        lineEndOffset
+      });
+    } catch {
+      // Ignore malformed lines inside an otherwise complete segment.
+    }
+  }
 
   const turns: ClaudeTurnSnapshot[] = [];
   let current: WorkingTurn | undefined;
@@ -685,7 +795,7 @@ export async function captureLatestClaudeTurnSnapshots(
     current = undefined;
   }
 
-  for (const entry of entries) {
+  for (const { entry, lineStartOffset, lineEndOffset } of entries) {
     const sessionId = cleanString(entry.sessionId) || cleanString(entry.session_id) || requestedSessionId || basename(filePath, ".jsonl");
     if (requestedSessionId && sessionId !== requestedSessionId) continue;
     if (isRealUserPrompt(entry)) {
@@ -695,10 +805,13 @@ export async function captureLatestClaudeTurnSnapshots(
       if (!text) continue;
       const requestId = cleanString(entry.uuid) || cleanString(entry.promptId) || stableEventId(`claude:request:${sessionId}:${turnIndex}:${text}`);
       const at = isoTimestamp(entry.timestamp);
+      const message = record(entry.message);
       current = {
         sessionId,
         turnIndex,
         requestId,
+        startOffset: lineStartOffset,
+        endOffset: lineEndOffset,
         userText: text,
         userAt: at,
         userKey: requestId,
@@ -723,16 +836,19 @@ export async function captureLatestClaudeTurnSnapshots(
         codeChanges: [],
         usage: {}
       };
+      current.steps.push(...claudeContextStepsFromContent(message?.content, requestId, at));
       continue;
     }
     if (!current) continue;
     if (entry.type === "user" && contentBlocks(entry).some((block) => record(block)?.type === "tool_result")) {
       attachToolResult(current, entry);
+      current.endOffset = lineEndOffset;
       continue;
     }
     if (entry.type === "assistant") {
       const message = record(entry.message);
       attachAssistantBlocks(current, entry);
+      current.endOffset = lineEndOffset;
       const text = assistantTextFromEntry(entry);
       const at = isoTimestamp(entry.timestamp);
       const hasError = Boolean(entry.error || entry.isApiErrorMessage || entry.apiErrorStatus);

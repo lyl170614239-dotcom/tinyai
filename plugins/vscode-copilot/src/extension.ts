@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -153,6 +153,8 @@ const COPILOT_CAPTURE_CAPABILITY = "turn-snapshot-v5";
 const CLAUDE_TRANSCRIPT_STATE_KEY = "tinyaiObservability.claudeTurnSnapshots";
 const CLAUDE_SESSION_CURSOR_STATE_KEY = "tinyaiObservability.claudeSessionCursors";
 const CLAUDE_CAPTURE_CAPABILITY = "claude-turn-snapshot-v1";
+const TRANSCRIPT_FULL_READ_MAX_BYTES = Number(process.env.TINYAI_OBS_TRANSCRIPT_FULL_READ_MAX_BYTES || 8 * 1024 * 1024);
+const TRANSCRIPT_READ_CHUNK_BYTES = 1024 * 1024;
 let codeChangeFlushTimer: ReturnType<typeof setTimeout> | undefined;
 const EDITOR_CHANGE_BUFFER_MS = 30 * 60_000;
 const TURN_EDITOR_WINDOW_BEFORE_MS = 2_000;
@@ -182,6 +184,9 @@ type CopilotTurnCaptureStateStore = Record<string, string | CopilotTurnCaptureSt
 type CopilotSessionCursor = {
   chat_fingerprint?: string;
   transcript_fingerprint?: string;
+  chat_read_offset?: number;
+  transcript_read_offset?: number;
+  initialized_at_eof?: boolean;
   processed_at: string;
 };
 type CopilotSessionCursorStore = Record<string, CopilotSessionCursor>;
@@ -222,6 +227,7 @@ function config() {
     autoCaptureCopilotLocalTranscripts: cfg.get<boolean>("autoCaptureCopilotLocalTranscripts") ?? true,
     autoCaptureClaudeLocalTranscripts: cfg.get<boolean>("autoCaptureClaudeLocalTranscripts") ?? true,
     autoCaptureCopilotCodeChanges: cfg.get<boolean>("autoCaptureCopilotCodeChanges") ?? true,
+    enableClaudeWorkspaceDiffFallback: cfg.get<boolean>("enableClaudeWorkspaceDiffFallback") ?? false,
     autoInstallGitHooks: cfg.get<boolean>("autoInstallGitHooks") ?? true,
     autoCaptureRecentMinutes: cfg.get<number>("autoCaptureRecentMinutes") ?? 30
   };
@@ -237,15 +243,21 @@ async function migrateLegacyCollectorUrl() {
 
 const PLUGIN_VERSION = "0.1.39";
 
-function client(): CollectorClient {
+function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
+  if (tool === "claude") return "tinyai-observability-claude";
+  if (tool === "codex") return "tinyai-observability-codex";
+  return "tinyai-observability-vscode";
+}
+
+function client(tool: ObservabilityEvent["tool"] = "copilot"): CollectorClient {
   const cfg = config();
   return new CollectorClient({
-    tool: "copilot",
+    tool,
     workspacePath: workspacePath(),
     baseUrl: cfg.collectorUrl,
     fallbackUrls: cfg.collectorFallbackUrls,
     token: cfg.token,
-    pluginName: "tinyai-observability-vscode",
+    pluginName: pluginNameForTool(tool),
     pluginVersion: PLUGIN_VERSION
   });
 }
@@ -1230,7 +1242,9 @@ async function recordClaudeTurnEditorDelta(snapshot: ClaudeTurnSnapshot, taskId:
       cwd
     );
   }
-  await recordClaudeTurnWorkspaceDiffFallback(snapshot, taskId, turnClientId, toolFiles, editorFiles, editorEntries);
+  if (config().enableClaudeWorkspaceDiffFallback) {
+    await recordClaudeTurnWorkspaceDiffFallback(snapshot, taskId, turnClientId, toolFiles, editorFiles, editorEntries);
+  }
 }
 
 async function recordClaudeTurnWorkspaceDiffFallback(
@@ -1659,8 +1673,7 @@ async function globalChatSessionFiles(): Promise<Array<{ path: string; transcrip
   return files.flat();
 }
 
-async function readJsonlRecords(path: string): Promise<Record<string, unknown>[]> {
-  const content = await readFile(path, "utf8");
+function parseJsonlRecords(content: string): Record<string, unknown>[] {
   return content
     .split(/\r?\n/)
     .filter((line) => line.trim())
@@ -1673,13 +1686,52 @@ async function readJsonlRecords(path: string): Promise<Record<string, unknown>[]
     });
 }
 
-async function sourceFileInfo(path: string, mtimeMs: number, size: number) {
-  const content = await readFile(path, "utf8");
+async function readTextSegment(path: string, startOffset = 0): Promise<{ content: string; startOffset: number; nextOffset: number }> {
+  const info = await stat(path);
+  const safeOffset = startOffset > 0 && startOffset <= info.size ? startOffset : 0;
+  if (safeOffset === 0) {
+    return { content: await readFile(path, "utf8"), startOffset: safeOffset, nextOffset: info.size };
+  }
+  const handle = await open(path, "r");
+  const chunks: Buffer[] = [];
+  let position = safeOffset;
+  try {
+    while (position < info.size) {
+      const length = Math.min(TRANSCRIPT_READ_CHUNK_BYTES, info.size - position);
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      if (bytesRead <= 0) break;
+      chunks.push(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  return { content: Buffer.concat(chunks).toString("utf8"), startOffset: safeOffset, nextOffset: info.size };
+}
+
+async function readJsonlRecords(path: string, startOffset = 0): Promise<{ records: Record<string, unknown>[]; nextOffset: number }> {
+  const segment = await readTextSegment(path, startOffset);
+  const lastNewline = segment.content.lastIndexOf("\n");
+  if (lastNewline < 0) {
+    return { records: [], nextOffset: segment.startOffset };
+  }
+  const completeContent = segment.content.slice(0, lastNewline + 1);
+  return {
+    records: parseJsonlRecords(completeContent),
+    nextOffset: segment.startOffset + Buffer.byteLength(completeContent, "utf8")
+  };
+}
+
+async function sourceFileInfo(path: string, mtimeMs: number, size: number, content?: string, readOffset = 0) {
+  const hashContent = content ?? (size <= TRANSCRIPT_FULL_READ_MAX_BYTES ? await readFile(path, "utf8") : `${path}:${mtimeMs}:${size}:${readOffset}`);
   return {
     path,
-    sha256: createHash("sha256").update(content).digest("hex"),
+    sha256: createHash("sha256").update(hashContent).digest("hex"),
     mtime_ms: mtimeMs,
-    size_bytes: size
+    size_bytes: size,
+    read_offset: readOffset,
+    hash_scope: content || size <= TRANSCRIPT_FULL_READ_MAX_BYTES ? "full_file_or_segment" : "metadata"
   };
 }
 
@@ -2138,6 +2190,20 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
     const chatFingerprint = fileFingerprint(chat);
     const transcriptFingerprint = fileFingerprint(transcript);
     const cursor = cursors[sessionKey];
+    const hasReadableOffsets = Boolean(cursor?.chat_read_offset || cursor?.transcript_read_offset);
+    if (!options.includeHistory && !hasReadableOffsets) {
+      cursors[sessionKey] = {
+        chat_fingerprint: chatFingerprint,
+        transcript_fingerprint: transcriptFingerprint,
+        chat_read_offset: chat.size,
+        transcript_read_offset: transcript?.size,
+        initialized_at_eof: true,
+        processed_at: new Date().toISOString()
+      };
+      cursorChanged = true;
+      skippedUnchanged += 1;
+      continue;
+    }
     if (
       !options.includeHistory &&
       cursor?.chat_fingerprint === chatFingerprint &&
@@ -2147,13 +2213,17 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
       continue;
     }
     try {
-      const chatEntries = await readJsonlRecords(chat.path);
-      const transcriptEntries = transcript ? await readJsonlRecords(transcript.path) : undefined;
+      const chatReadOffset = options.includeHistory ? 0 : cursor?.chat_read_offset || 0;
+      const transcriptReadOffset = options.includeHistory ? 0 : cursor?.transcript_read_offset || 0;
+      const chatRead = await readJsonlRecords(chat.path, chatReadOffset);
+      const transcriptRead = transcript ? await readJsonlRecords(transcript.path, transcriptReadOffset) : undefined;
+      const chatEntries = chatRead.records;
+      const transcriptEntries = transcriptRead?.records;
       const snapshots = buildCopilotTurnSnapshots({
         chat_entries: chatEntries,
         transcript_entries: transcriptEntries,
-        chat_file: await sourceFileInfo(chat.path, chat.mtimeMs, chat.size),
-        transcript_file: transcript ? await sourceFileInfo(transcript.path, transcript.mtimeMs, transcript.size) : undefined
+        chat_file: await sourceFileInfo(chat.path, chat.mtimeMs, chat.size, undefined, chatReadOffset),
+        transcript_file: transcript ? await sourceFileInfo(transcript.path, transcript.mtimeMs, transcript.size, undefined, transcriptReadOffset) : undefined
       });
       for (const snapshot of snapshots) {
         const seenKey = `turn:${snapshot.session_id}:${snapshot.request_id}:${snapshot.response_id}:${COPILOT_CAPTURE_CAPABILITY}`;
@@ -2199,6 +2269,9 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
       cursors[sessionKey] = {
         chat_fingerprint: chatFingerprint,
         transcript_fingerprint: transcriptFingerprint,
+        chat_read_offset: chatRead.nextOffset,
+        transcript_read_offset: transcriptRead?.nextOffset,
+        initialized_at_eof: false,
         processed_at: new Date().toISOString()
       };
       cursorChanged = true;
@@ -2309,20 +2382,27 @@ async function captureClaudeLocalTranscripts(options: { silent?: boolean; includ
     const fingerprint = fileFingerprint(file, CLAUDE_CAPTURE_CAPABILITY);
     const cursorKey = file.path;
     const cursor = cursors[cursorKey];
+    if (!options.includeHistory && !cursor?.chat_read_offset) {
+      cursors[cursorKey] = {
+        chat_fingerprint: fingerprint,
+        chat_read_offset: file.size,
+        initialized_at_eof: true,
+        processed_at: new Date().toISOString()
+      };
+      cursorChanged = true;
+      continue;
+    }
     if (!options.includeHistory && cursor?.chat_fingerprint === fingerprint) continue;
     try {
       const snapshots = await captureLatestClaudeTurnSnapshots({
         sessionFile: file.path,
         latestOnly: false,
-        includeText: config().captureConversationText
+        includeText: config().captureConversationText,
+        startOffset: options.includeHistory ? 0 : cursor?.chat_read_offset || 0
       });
+      let committedOffset = cursor?.chat_read_offset || 0;
       for (const snapshot of snapshots) {
-        if (
-          snapshot.turn.status === "incomplete" &&
-          !snapshot.assistant_message &&
-          (snapshot.tool_calls?.length || 0) === 0 &&
-          (snapshot.process_steps?.length || 0) === 0
-        ) {
+        if (snapshot.turn.status === "incomplete") {
           continue;
         }
         const cwd = snapshot.cwd || workspacePath();
@@ -2368,12 +2448,20 @@ async function captureClaudeLocalTranscripts(options: { silent?: boolean; includ
         pendingTurnStateKeysByEventId.set(eventId, seenKey);
         seenChanged = true;
         uploaded += 1;
+        const nextOffset = Number(snapshot.source_files?.claude_project_jsonl?.next_offset);
+        if (Number.isFinite(nextOffset) && nextOffset > committedOffset) {
+          committedOffset = nextOffset;
+        }
       }
-      cursors[cursorKey] = {
-        chat_fingerprint: fingerprint,
-        processed_at: new Date().toISOString()
-      };
-      cursorChanged = true;
+      if (committedOffset > (cursor?.chat_read_offset || 0)) {
+        cursors[cursorKey] = {
+          chat_fingerprint: fingerprint,
+          chat_read_offset: committedOffset,
+          initialized_at_eof: false,
+          processed_at: new Date().toISOString()
+        };
+        cursorChanged = true;
+      }
     } catch (error) {
       parseErrorCount += 1;
       console.warn("TinyAI Observability failed to build Claude turn snapshots", file.path, error);
@@ -2439,7 +2527,7 @@ async function flush(): Promise<BatchUploadResult | undefined> {
   }
   let merged: BatchUploadResult | undefined;
   for (const [tool, events] of grouped.entries()) {
-    const result = await client().upload(tool, events);
+    const result = await client(tool).upload(tool, events);
     merged = {
       accepted: (merged?.accepted || 0) + (result.accepted || 0),
       duplicates: (merged?.duplicates || 0) + (result.duplicates || 0),

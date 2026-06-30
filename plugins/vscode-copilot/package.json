@@ -103,6 +103,11 @@
           "default": true,
           "description": "Automatically capture per-turn code changes from Copilot tool-call edit payloads and VS Code text document changes. This excludes pre-existing workspace git diff."
         },
+        "tinyaiObservability.enableClaudeWorkspaceDiffFallback": {
+          "type": "boolean",
+          "default": false,
+          "description": "Advanced: allow Claude transcript capture to upload turn-end workspace git diff fallback evidence. Disabled by default to avoid attributing pre-existing workspace changes to the current Claude turn."
+        },
         "tinyaiObservability.autoInstallGitHooks": {
           "type": "boolean",
           "default": true,

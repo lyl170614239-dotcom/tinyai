@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 from dateutil import parser as date_parser
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..models import (
@@ -47,6 +47,7 @@ MUTABLE_CODE_SNAPSHOT_KINDS = {
     "claude_turn_editor_delta",
     "claude_turn_tool_patch",
     "claude_turn_workspace_diff",
+    "claude_turn_bash_delta",
     "codex_turn_editor_delta",
     "codex_turn_tool_patch",
     "codex_turn_workspace_diff",
@@ -64,6 +65,7 @@ AI_TURN_CODE_SNAPSHOT_KINDS = {
     "claude_turn_tool_patch",
     "claude_turn_editor_delta",
     "claude_turn_workspace_diff",
+    "claude_turn_bash_delta",
     "codex_turn_tool_patch",
     "codex_turn_editor_delta",
     "codex_turn_workspace_diff",
@@ -554,8 +556,12 @@ def _upsert_turn(
     created_at: datetime,
     request_id: str | None = None,
     response_id: str | None = None,
+    *,
+    tool: str | None = None,
+    status: str | None = None,
 ) -> AiTurn:
     turn = None
+    preserve_existing_turn_index = False
     if request_id and response_id:
         turn = (
             db.execute(
@@ -566,6 +572,35 @@ def _upsert_turn(
             )
             .scalar_one_or_none()
         )
+    if not turn and tool == "claude" and request_id:
+        # Claude Code can emit several snapshots for the same user request while
+        # the JSONL file is still being written. Those snapshots may carry
+        # different response_id values and, when captured by hook offsets, a
+        # segment-relative turn_index. The logical turn boundary is the user
+        # request_id, so merge the later complete snapshot into the existing
+        # request row instead of creating "turn 1/2" duplicates for a real
+        # "turn 3/4".
+        candidates = (
+            db.execute(
+                select(AiTurn)
+                .where(AiTurn.session_id == session_id)
+                .where(AiTurn.request_id == request_id)
+                .order_by(
+                    AiTurn.status.in_(["in_progress", "incomplete", "active", "idle"]).desc(),
+                    AiTurn.turn_index.desc(),
+                    AiTurn.id.asc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if candidates:
+            turn = candidates[0]
+            # Keep an established full-session index when the incoming snapshot
+            # is segment-relative (for example 1/2). If a later full-file scan
+            # carries a larger index for the same request, let it correct a
+            # previously stored segment-relative index.
+            preserve_existing_turn_index = turn.turn_index > 0 and turn.turn_index >= turn_index
     if not turn:
         turn_query = (
             select(AiTurn)
@@ -595,17 +630,44 @@ def _upsert_turn(
         db.add(turn)
         db.flush()
     else:
-        if request_id and response_id:
+        previous_turn_index = turn.turn_index
+        if request_id and response_id and not preserve_existing_turn_index:
             turn.created_at = created_at
         else:
             turn.created_at = min(turn.created_at, created_at)
-        turn.turn_index = turn_index
+        if not preserve_existing_turn_index:
+            turn.turn_index = turn_index
+            if previous_turn_index != turn_index:
+                for model in (AiMessage, AiProcessStep, AiCodeChange, AiSpecAccess, AiRequestUsage):
+                    db.execute(update(model).where(model.turn_id == turn.id).values(turn_index=turn_index))
         turn.task_id = turn.task_id or task_id
         if request_id:
             turn.request_id = request_id
         if response_id:
-            turn.response_id = response_id
+            normalized_status = str(status or "").lower()
+            if (
+                not turn.response_id
+                or normalized_status == "completed"
+                or (turn.status in {"in_progress", "incomplete", "active", "idle"} and normalized_status not in _OPEN_TURN_STATUSES)
+            ):
+                turn.response_id = response_id
     return turn
+
+
+_OPEN_TURN_STATUSES = {"in_progress", "incomplete", "active", "idle", "streaming"}
+
+
+def _normalized_turn_status(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"", "done", "success"}:
+        return "completed"
+    if status in {"active", "streaming"}:
+        return "in_progress"
+    return status[:24]
+
+
+def _is_open_turn_status(status: str | None) -> bool:
+    return str(status or "").strip().lower() in _OPEN_TURN_STATUSES
 
 
 def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: dict[str, Any], turn: AiTurn | None) -> AiMessage:
@@ -658,7 +720,8 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
             .scalar_one_or_none()
         )
         if index_taken is not None:
-            message_index = int(db.execute(select(func.max(AiMessage.message_index)).where(AiMessage.session_id == session_id)).scalar() or -1) + 1
+            max_message_index = db.execute(select(func.max(AiMessage.message_index)).where(AiMessage.session_id == session_id)).scalar()
+            message_index = int(max_message_index if max_message_index is not None else -1) + 1
     if existing:
         row = existing
         row.turn_id = turn.id if turn else row.turn_id
@@ -2169,6 +2232,7 @@ def _code_snapshot_priority(change: AiCodeChange) -> int:
         "copilot_turn_tool_patch": 20,
         "copilot_turn_editor_delta": 10,
         "claude_turn_workspace_diff": 30,
+        "claude_turn_bash_delta": 25,
         "claude_turn_tool_patch": 20,
         "claude_turn_editor_delta": 10,
         "codex_turn_workspace_diff": 30,
@@ -2351,6 +2415,8 @@ def _upsert_ai_product_tables(db: Session, event: EventIn, payload: dict[str, An
         for turn in db.execute(select(AiTurn).where(AiTurn.session_id == session_id)).scalars().all()
     }
     normalized_turns = normalized.get("turns")
+    turn_status_by_request: dict[str, str] = {}
+    turn_status_by_index: dict[int, str] = {}
     if isinstance(normalized_turns, list):
         for turn_data in normalized_turns:
             if not isinstance(turn_data, dict):
@@ -2358,6 +2424,12 @@ def _upsert_ai_product_tables(db: Session, event: EventIn, payload: dict[str, An
             turn_index = int(turn_data.get("turn_index") or 0)
             if turn_index <= 0:
                 continue
+            request_id = str(turn_data.get("request_id") or "")[:256] or None
+            response_id = str(turn_data.get("response_id") or "")[:256] or None
+            turn_status = _normalized_turn_status(turn_data.get("status"))
+            if request_id:
+                turn_status_by_request[request_id] = turn_status
+            turn_status_by_index[turn_index] = turn_status
             created_at = _parse_time(turn_data.get("started_at"), event.occurred_at)
             turn = _upsert_turn(
                 db,
@@ -2365,13 +2437,18 @@ def _upsert_ai_product_tables(db: Session, event: EventIn, payload: dict[str, An
                 event.task_id,
                 turn_index,
                 created_at,
-                str(turn_data.get("request_id") or "")[:256] or None,
-                str(turn_data.get("response_id") or "")[:256] or None,
+                request_id,
+                response_id,
+                tool=event.tool,
+                status=turn_status,
             )
-            if turn_data.get("completed_at"):
+            if _is_open_turn_status(turn_status):
+                if turn.completed_at is None:
+                    turn.status = turn_status
+            elif turn_data.get("completed_at"):
                 turn.completed_at = _parse_time(turn_data.get("completed_at"), event.occurred_at)
-                turn.status = str(turn_data.get("status") or "completed")[:24]
-            turns_by_index[turn_index] = turn
+                turn.status = turn_status or "completed"
+            turns_by_index[turn.turn_index] = turn
 
     current_turn: AiTurn | None = None
     current_turn_index = 0
@@ -2403,12 +2480,22 @@ def _upsert_ai_product_tables(db: Session, event: EventIn, payload: dict[str, An
                     occurred,
                     message_request_id,
                     message_response_id,
+                    tool=event.tool,
+                    status=turn_status_by_request.get(message_request_id or "") or turn_status_by_index.get(current_turn_index),
                 )
-                turns_by_index[current_turn_index] = current_turn
+                turns_by_index[current_turn.turn_index] = current_turn
         elif role == "user":
             current_turn_index += 1
-            current_turn = _upsert_turn(db, session_id, event.task_id, current_turn_index, occurred)
-            turns_by_index[current_turn_index] = current_turn
+            current_turn = _upsert_turn(
+                db,
+                session_id,
+                event.task_id,
+                current_turn_index,
+                occurred,
+                tool=event.tool,
+                status=turn_status_by_index.get(current_turn_index),
+            )
+            turns_by_index[current_turn.turn_index] = current_turn
         elif current_turn is None and current_turn_index > 0:
             current_turn = turns_by_index.get(current_turn_index)
 
@@ -2417,12 +2504,15 @@ def _upsert_ai_product_tables(db: Session, event: EventIn, payload: dict[str, An
         row = _upsert_ai_message(db, event, session_id, message, current_turn)
         if current_turn and role == "user":
             current_turn.user_message_id = row.id
-            current_turn.status = "in_progress"
+            if current_turn.completed_at is None:
+                current_turn.status = "in_progress"
         elif current_turn and role == "assistant":
             current_turn.assistant_message_id = row.id
-            if current_turn.completed_at is None:
+            turn_status = turn_status_by_request.get(current_turn.request_id or "") or turn_status_by_index.get(current_turn.turn_index)
+            if current_turn.completed_at is None and not _is_open_turn_status(turn_status):
                 current_turn.completed_at = occurred
-            current_turn.status = "completed"
+            if not _is_open_turn_status(turn_status):
+                current_turn.status = "completed"
 
     turns = list(turns_by_index.values())
     _upsert_ai_request_usage(db, event, session_id, normalized, turns_by_index)

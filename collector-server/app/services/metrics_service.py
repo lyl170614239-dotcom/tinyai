@@ -175,6 +175,7 @@ AI_TURN_CODE_SNAPSHOT_KINDS = {
     "claude_turn_tool_patch",
     "claude_turn_editor_delta",
     "claude_turn_workspace_diff",
+    "claude_turn_bash_delta",
     "codex_turn_tool_patch",
     "codex_turn_editor_delta",
     "codex_turn_workspace_diff",

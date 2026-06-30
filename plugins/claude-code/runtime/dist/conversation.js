@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 async function walkJsonl(root, maxFiles = 500) {
@@ -70,6 +70,165 @@ function extractText(content) {
 }
 function hashText(text) {
     return createHash("sha256").update(text).digest("hex").slice(0, 32);
+}
+const JSONL_READ_CHUNK_BYTES = 1024 * 1024;
+function cursorStoreDir() {
+    const configured = cleanString(process.env.TINYAI_OBS_CURSOR_DIR);
+    return configured || join(homedir(), ".tinyai-observability", "cursors");
+}
+function cursorStorePath(tool) {
+    return join(cursorStoreDir(), `${tool}-conversation-cursors.json`);
+}
+function cursorKey(filePath) {
+    return hashText(filePath);
+}
+async function loadCursorStore(tool) {
+    try {
+        const raw = await readFile(cursorStorePath(tool), "utf8");
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    }
+    catch {
+        return {};
+    }
+}
+async function saveCursorStore(tool, store) {
+    const dir = cursorStoreDir();
+    await mkdir(dir, { recursive: true });
+    const target = cursorStorePath(tool);
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await rename(tmp, target);
+}
+function fallbackSessionIdFromFile(filePath) {
+    const name = basename(filePath, ".jsonl");
+    const rolloutMatch = name.match(/(?:^|[-_])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+    return rolloutMatch?.[1] || name;
+}
+function canonicalSessionIdForFile(sessionId, filePath) {
+    const fileSessionId = fallbackSessionIdFromFile(filePath);
+    if (!sessionId)
+        return fileSessionId;
+    if (sessionId.startsWith("rollout-") && fileSessionId !== sessionId)
+        return fileSessionId;
+    return sessionId;
+}
+async function readCompleteJsonlLines(filePath, offset, fileSize) {
+    if (offset >= fileSize)
+        return { lines: [], nextOffset: offset };
+    const handle = await open(filePath, "r");
+    try {
+        const chunks = [];
+        let position = offset;
+        while (position < fileSize) {
+            const length = Math.min(JSONL_READ_CHUNK_BYTES, fileSize - position);
+            const buffer = Buffer.allocUnsafe(length);
+            const { bytesRead } = await handle.read(buffer, 0, length, position);
+            if (bytesRead <= 0)
+                break;
+            chunks.push(buffer.subarray(0, bytesRead));
+            position += bytesRead;
+        }
+        const raw = Buffer.concat(chunks).toString("utf8");
+        const lastNewline = raw.lastIndexOf("\n");
+        if (lastNewline < 0)
+            return { lines: [], nextOffset: offset };
+        const completeText = raw.slice(0, lastNewline + 1);
+        const nextOffset = offset + Buffer.byteLength(completeText, "utf8");
+        return { lines: completeText.split(/\r?\n/).filter(Boolean), nextOffset };
+    }
+    finally {
+        await handle.close();
+    }
+}
+async function readIncrementalJsonlLines(tool, filePath, options = {}) {
+    const info = await stat(filePath);
+    const store = await loadCursorStore(tool);
+    const key = cursorKey(filePath);
+    const state = store[key];
+    if (!state && options.bootstrapAtEof) {
+        const now = new Date().toISOString();
+        store[key] = {
+            file_path: filePath,
+            file_size: info.size,
+            read_offset: info.size,
+            updated_at: now,
+            session_id: canonicalSessionIdForFile(undefined, filePath)
+        };
+        await saveCursorStore(tool, store);
+        return {
+            lines: [],
+            state: store[key],
+            cursor: {
+                tool,
+                key,
+                file_path: filePath,
+                previous_offset: info.size,
+                next_offset: info.size,
+                file_size: info.size,
+                line_count: 0,
+                initialized_at_eof: true
+            }
+        };
+    }
+    const previousOffset = Math.max(0, Math.min(state?.read_offset ?? 0, info.size));
+    const { lines, nextOffset } = await readCompleteJsonlLines(filePath, previousOffset, info.size);
+    return {
+        lines,
+        state,
+        cursor: {
+            tool,
+            key,
+            file_path: filePath,
+            previous_offset: previousOffset,
+            next_offset: nextOffset,
+            file_size: info.size,
+            line_count: lines.length
+        }
+    };
+}
+export async function commitConversationCursor(snapshot) {
+    const cursor = snapshot.capture_cursor;
+    if (!cursor)
+        return false;
+    const store = await loadCursorStore(cursor.tool);
+    const existing = store[cursor.key];
+    if (existing && existing.read_offset > cursor.next_offset)
+        return false;
+    store[cursor.key] = {
+        file_path: cursor.file_path,
+        file_size: cursor.file_size,
+        read_offset: cursor.next_offset,
+        updated_at: new Date().toISOString(),
+        session_id: canonicalSessionIdForFile(snapshot.session_id || existing?.session_id, cursor.file_path),
+        cwd: snapshot.cwd || existing?.cwd,
+        source: snapshot.source || existing?.source
+    };
+    await saveCursorStore(cursor.tool, store);
+    return true;
+}
+function emptyConversationSnapshot(input) {
+    return {
+        session_id: canonicalSessionIdForFile(input.sessionId, input.file),
+        session_file: input.file.replace(homedir(), "~"),
+        source: input.source,
+        message_count: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        user_followup_count: 0,
+        turn_started_count: 0,
+        turn_completed_count: 0,
+        turn_aborted_count: 0,
+        task_repeat_attempts: 0,
+        tool_call_count: 0,
+        tool_result_count: 0,
+        patch_apply_count: 0,
+        patch_success_count: 0,
+        include_text: input.includeText,
+        messages: [],
+        latest_turn_complete: false,
+        capture_cursor: input.cursor
+    };
 }
 function finiteNumber(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -335,6 +494,19 @@ function buildCodexRequestUsage(input) {
     const resolvedModel = [...requestUsage].reverse().find((usage) => usage.model)?.model;
     return { requestUsage, usageTotals, resolvedModel };
 }
+function codexLatestTurnComplete(messages, turnEvents) {
+    let lastUserSequence;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message?.role === "user") {
+            lastUserSequence = message.sequence;
+            break;
+        }
+    }
+    if (lastUserSequence === undefined)
+        return false;
+    return turnEvents.some((event) => event.kind === "task_complete" && typeof event.sequence === "number" && event.sequence >= lastUserSequence);
+}
 export function latestCodexTurnSnapshot(snapshot) {
     const messages = snapshot.messages || [];
     let lastUserIndex = -1;
@@ -345,7 +517,7 @@ export function latestCodexTurnSnapshot(snapshot) {
         }
     }
     if (lastUserIndex < 0)
-        return snapshot;
+        return { ...snapshot, latest_turn_complete: false };
     const turnIndex = messages.slice(0, lastUserIndex + 1).filter((message) => message.role === "user").length;
     const userMessage = messages[lastUserIndex];
     const boundarySequence = typeof userMessage.sequence === "number" ? userMessage.sequence : undefined;
@@ -458,7 +630,19 @@ export async function captureLatestCodexConversation(options = {}) {
     if (!file)
         throw new Error("No Codex session file found under ~/.codex/sessions");
     const includeText = Boolean(options.includeText);
-    const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
+    const { lines, cursor, state } = await readIncrementalJsonlLines("codex", file, {
+        bootstrapAtEof: !options.sessionFile
+    });
+    if (lines.length === 0) {
+        return emptyConversationSnapshot({
+            tool: "codex",
+            file,
+            includeText,
+            sessionId: options.sessionId || state?.session_id,
+            cursor,
+            source: state?.source
+        });
+    }
     const messages = [];
     const processSteps = [];
     const fileReads = new Map();
@@ -466,9 +650,9 @@ export async function captureLatestCodexConversation(options = {}) {
     const turnEvents = [];
     const tokenUsageEvents = [];
     const modelEvents = [];
-    let sessionId = options.sessionId;
-    let cwd;
-    let source;
+    let sessionId = canonicalSessionIdForFile(options.sessionId || state?.session_id, file);
+    let cwd = state?.cwd;
+    let source = state?.source;
     let toolCallCount = 0;
     let toolResultCount = 0;
     let turnStartedCount = 0;
@@ -687,7 +871,9 @@ export async function captureLatestCodexConversation(options = {}) {
         code_edits: codeEdits.length > 0 ? codeEdits : undefined,
         turn_events: turnEvents.length > 0 ? turnEvents : undefined,
         request_usage: requestUsage.length > 0 ? requestUsage : undefined,
-        usage_totals: requestUsage.length > 0 ? usageTotals : undefined
+        usage_totals: requestUsage.length > 0 ? usageTotals : undefined,
+        latest_turn_complete: codexLatestTurnComplete(messages, turnEvents),
+        capture_cursor: cursor
     };
     return options.latestTurnOnly ? latestCodexTurnSnapshot(snapshot) : snapshot;
 }
@@ -772,13 +958,25 @@ export async function captureLatestClaudeConversation(options = {}) {
     if (!file)
         throw new Error("No Claude transcript file found under ~/.claude/transcripts or ~/.claude/projects");
     const includeText = Boolean(options.includeText);
-    const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
+    const { lines, cursor, state } = await readIncrementalJsonlLines("claude", file, {
+        bootstrapAtEof: !options.sessionFile
+    });
+    if (lines.length === 0) {
+        return emptyConversationSnapshot({
+            tool: "claude",
+            file,
+            includeText,
+            sessionId: options.sessionId || state?.session_id,
+            cursor,
+            source: state?.source || "claude-transcript"
+        });
+    }
     const messages = [];
     const processSteps = [];
     const fileReads = new Map();
     const codeEdits = [];
-    let sessionId = options.sessionId || basename(file, ".jsonl");
-    let cwd;
+    let sessionId = options.sessionId || state?.session_id || basename(file, ".jsonl");
+    let cwd = state?.cwd;
     let toolCallCount = 0;
     let toolResultCount = 0;
     const seenMessageIds = new Set();
@@ -898,7 +1096,8 @@ export async function captureLatestClaudeConversation(options = {}) {
         messages,
         process_steps: dedupedSteps.length > 0 ? dedupedSteps : undefined,
         file_reads: fileReads.size > 0 ? [...fileReads.values()] : undefined,
-        code_edits: codeEdits.length > 0 ? codeEdits : undefined
+        code_edits: codeEdits.length > 0 ? codeEdits : undefined,
+        capture_cursor: cursor
     };
 }
 export async function captureLatestConversation(tool, options = {}) {

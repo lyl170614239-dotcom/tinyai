@@ -26,6 +26,7 @@ SPEC_EDIT_SNAPSHOT_KINDS = {
     "claude_turn_tool_patch",
     "claude_turn_editor_delta",
     "claude_turn_workspace_diff",
+    "claude_turn_bash_delta",
     "codex_turn_tool_patch",
     "codex_turn_editor_delta",
     "codex_turn_workspace_diff",
@@ -707,11 +708,21 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
         return []
 
     changes: list[dict[str, Any]] = []
+    def first_int_present(*values: Any) -> int:
+        for value in values:
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
     for index, raw in enumerate(files):
         if not isinstance(raw, dict):
             continue
-        lines_added = int(raw.get("lines_added") or raw.get("added_line_count") or payload.get("lines_added") or payload.get("ai_lines_added") or 0)
-        lines_deleted = int(raw.get("lines_deleted") or raw.get("removed_line_count") or payload.get("lines_deleted") or payload.get("ai_lines_deleted") or 0)
+        lines_added = first_int_present(raw.get("lines_added"), raw.get("added_line_count"), payload.get("lines_added"), payload.get("ai_lines_added"))
+        lines_deleted = first_int_present(raw.get("lines_deleted"), raw.get("removed_line_count"), payload.get("lines_deleted"), payload.get("ai_lines_deleted"))
         raw_path = "$.payload"
         if isinstance(raw_embedded, list):
             raw_path = f"$.code_changes[{index}]"

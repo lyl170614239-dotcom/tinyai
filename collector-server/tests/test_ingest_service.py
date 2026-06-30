@@ -779,6 +779,236 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(len(detail["turns"][0]["user_messages"]), 1)
         self.assertEqual(len(detail["turns"][0]["assistant_messages"]), 1)
 
+    def test_claude_segment_relative_turn_indexes_merge_by_request_id(self):
+        def turn_event(
+            event_id: str,
+            turn_index: int,
+            request_id: str,
+            response_id: str,
+            status: str,
+            user_text: str,
+            assistant_text: str | None,
+            occurred_at: datetime,
+        ) -> EventIn:
+            messages = [
+                {
+                    "role": "user",
+                    "text": user_text,
+                    "source_key": f"{request_id}:user",
+                    "turn_index": turn_index,
+                    "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
+                }
+            ]
+            if assistant_text is not None:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "text": assistant_text,
+                        "source_key": f"{request_id}:{response_id}:assistant",
+                        "turn_index": turn_index,
+                        "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
+                    }
+                )
+            return EventIn(
+                event_id=event_id,
+                task_id="claude-session-segment",
+                session_id="claude-session-segment",
+                tool="claude",
+                event_type="turn_snapshot",
+                occurred_at=occurred_at,
+                source_confidence="derived",
+                username="zhangsan",
+                user_id="zhangsan@example.com",
+                payload={
+                    "session_id": "claude-session-segment",
+                    "request_id": request_id,
+                    "response_id": response_id,
+                    "title": "Claude 分段日志",
+                    "resolved_model": "deepseek-v4-pro",
+                    "turn": {
+                        "turn_index": turn_index,
+                        "request_id": request_id,
+                        "response_id": response_id,
+                        "status": status,
+                        "started_at": occurred_at.isoformat().replace("+00:00", "Z"),
+                        "completed_at": occurred_at.isoformat().replace("+00:00", "Z") if status == "completed" else None,
+                    },
+                    "messages": messages,
+                },
+            )
+
+        batch = BatchIn(
+            client_id="client-claude-segment",
+            plugin_name="tinyai-observability-claude",
+            plugin_version="0.1.38",
+            username="zhangsan",
+            user_id="zhangsan@example.com",
+            events=[
+                # VS Code full-file scanner sees these as real turn 3/4 while
+                # the assistant answer is still being written.
+                turn_event(
+                    "claude-partial-turn3",
+                    3,
+                    "request-style",
+                    "response-style-progress",
+                    "incomplete",
+                    "修改一下刘芸隆md 修改里面的风格",
+                    None,
+                    datetime(2026, 6, 29, 15, 13, 9, tzinfo=timezone.utc),
+                ),
+                turn_event(
+                    "claude-partial-turn4",
+                    4,
+                    "request-wuxia",
+                    "response-wuxia-progress",
+                    "incomplete",
+                    "武侠风",
+                    None,
+                    datetime(2026, 6, 29, 15, 14, 19, tzinfo=timezone.utc),
+                ),
+                # Claude hook reads only a later segment, so the same request IDs
+                # arrive as segment-relative turn 1/2 with final assistant text.
+                turn_event(
+                    "claude-complete-segment1",
+                    1,
+                    "request-style",
+                    "response-style-final",
+                    "completed",
+                    "修改一下刘芸隆md 修改里面的风格",
+                    "想改成什么风格？",
+                    datetime(2026, 6, 29, 15, 18, 20, tzinfo=timezone.utc),
+                ),
+                turn_event(
+                    "claude-complete-segment2",
+                    2,
+                    "request-wuxia",
+                    "response-wuxia-final",
+                    "completed",
+                    "武侠风",
+                    "改好了！刘芸隆.md 已变身武侠风。",
+                    datetime(2026, 6, 29, 15, 18, 33, tzinfo=timezone.utc),
+                ),
+            ],
+        )
+
+        result = ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        turns = self.db.execute(select(AiTurn).order_by(AiTurn.turn_index.asc())).scalars().all()
+        detail = get_session_detail("claude-session-segment", db=self.db)
+
+        self.assertEqual(result["accepted"], 4)
+        self.assertEqual(stats["succeeded"], 4)
+        self.assertEqual([(turn.turn_index, turn.request_id, turn.status) for turn in turns], [(3, "request-style", "completed"), (4, "request-wuxia", "completed")])
+        self.assertEqual([turn["turn_index"] for turn in detail["turns"]], [3, 4])
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["content"], "修改一下刘芸隆md 修改里面的风格")
+        self.assertIn("想改成什么风格", detail["turns"][0]["assistant_messages"][0]["content"])
+        self.assertEqual(detail["turns"][1]["user_messages"][0]["content"], "武侠风")
+        self.assertIn("已变身武侠风", detail["turns"][1]["assistant_messages"][0]["content"])
+
+    def test_claude_completed_turn_is_not_downgraded_by_late_incomplete_replay(self):
+        def turn_event(
+            event_id: str,
+            turn_index: int,
+            request_id: str,
+            response_id: str,
+            status: str,
+            user_text: str,
+            assistant_text: str | None,
+            occurred_at: datetime,
+        ) -> EventIn:
+            messages = [
+                {
+                    "role": "user",
+                    "text": user_text,
+                    "source_key": f"{request_id}:user",
+                    "turn_index": turn_index,
+                    "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
+                }
+            ]
+            if assistant_text:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "text": assistant_text,
+                        "source_key": f"{request_id}:{response_id}:assistant",
+                        "turn_index": turn_index,
+                        "occurred_at": occurred_at.isoformat().replace("+00:00", "Z"),
+                    }
+                )
+            return EventIn(
+                event_id=event_id,
+                task_id="claude-session-late-replay",
+                session_id="claude-session-late-replay",
+                tool="claude",
+                event_type="turn_snapshot",
+                occurred_at=occurred_at,
+                source_confidence="derived",
+                username="zhangsan",
+                user_id="zhangsan@example.com",
+                payload={
+                    "session_id": "claude-session-late-replay",
+                    "request_id": request_id,
+                    "response_id": response_id,
+                    "title": user_text,
+                    "resolved_model": "claude-opus-4-6",
+                    "turn": {
+                        "turn_index": turn_index,
+                        "request_id": request_id,
+                        "response_id": response_id,
+                        "status": status,
+                        "started_at": occurred_at.isoformat().replace("+00:00", "Z"),
+                        "completed_at": occurred_at.isoformat().replace("+00:00", "Z") if status == "completed" else None,
+                    },
+                    "messages": messages,
+                },
+            )
+
+        batch = BatchIn(
+            client_id="client-claude-replay",
+            plugin_name="tinyai-observability-claude",
+            plugin_version="0.1.38",
+            username="zhangsan",
+            user_id="zhangsan@example.com",
+            events=[
+                turn_event(
+                    "claude-completed-first",
+                    3,
+                    "request-happy",
+                    "response-happy-final",
+                    "completed",
+                    "开心的分割",
+                    "已经改成开心风格。",
+                    datetime(2026, 6, 29, 15, 20, tzinfo=timezone.utc),
+                ),
+                turn_event(
+                    "claude-late-incomplete-replay",
+                    1,
+                    "request-happy",
+                    "request-happy:no_response",
+                    "incomplete",
+                    "开心的分割",
+                    None,
+                    datetime(2026, 6, 29, 15, 21, tzinfo=timezone.utc),
+                ),
+            ],
+        )
+
+        result = ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        turns = self.db.execute(select(AiTurn).order_by(AiTurn.turn_index.asc())).scalars().all()
+        detail = get_session_detail("claude-session-late-replay", db=self.db)
+
+        self.assertEqual(result["accepted"], 2)
+        self.assertEqual(stats["succeeded"], 2)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].turn_index, 3)
+        self.assertEqual(turns[0].request_id, "request-happy")
+        self.assertEqual(turns[0].response_id, "response-happy-final")
+        self.assertEqual(turns[0].status, "completed")
+        self.assertEqual(len(detail["turns"]), 1)
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["content"], "开心的分割")
+        self.assertEqual(detail["turns"][0]["assistant_messages"][0]["content"], "已经改成开心风格。")
+
     def test_session_detail_hides_legacy_duplicate_messages(self):
         now = datetime(2026, 6, 29, 7, 25, tzinfo=timezone.utc)
         text_hash = hashlib.sha256("你好！有什么我可以帮您的吗？".encode("utf-8")).hexdigest()

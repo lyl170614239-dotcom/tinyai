@@ -1,8 +1,13 @@
 #!/usr/bin/env node
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { cwd } from "node:process";
 import { captureLatestClaudeTurnSnapshots } from "./claude-turn.js";
+import { claudeWorkspaceDiffPathCandidates, hasClaudeExternalWriteSignal } from "./claude-workspace-fallback.js";
 import { CollectorClient } from "./client.js";
 import { loadTinyAiEnvFile } from "./config.js";
+import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
 import { captureLatestConversation } from "./conversation.js";
 import { makeEvent, stableEventId } from "./event-schema.js";
 import { commitSnapshot, currentDiffDetails, diffSummary, pushSnapshot, recordAiLineSnapshot } from "./git.js";
@@ -38,82 +43,81 @@ if (raw.trim()) {
 const hookSessionIdValue = hookPayload.session_id || hookPayload.sessionId || hookPayload.conversation_id;
 const hookSessionId = typeof hookSessionIdValue === "string" ? hookSessionIdValue : undefined;
 const hookTaskId = process.env.TINYAI_OBS_TASK_ID || hookSessionId;
+const hookSessionFile = hookPayload.transcript_path ||
+    hookPayload.transcriptPath ||
+    hookPayload.session_file ||
+    hookPayload.sessionFile;
 const payload = raw ? { hook_payload_present: true, hook_payload_bytes: Buffer.byteLength(raw) } : {};
 const events = eventType === "commit_snapshot" || eventType === "push_snapshot"
     ? []
     : [makeEvent({ tool, eventType, taskId: hookTaskId, sessionId: hookSessionId, workspacePath, payload, sourceConfidence: "derived" })];
-function textFromUnknown(value) {
-    if (typeof value === "string")
-        return value;
-    if (typeof value === "number" || typeof value === "boolean")
-        return String(value);
-    if (Array.isArray(value))
-        return value.map(textFromUnknown).filter(Boolean).join("\n");
-    if (value && typeof value === "object") {
-        return Object.values(value).map(textFromUnknown).filter(Boolean).join("\n");
-    }
-    return "";
+const afterSuccessfulUpload = [];
+function claudeTurnCursorStorePath() {
+    return join(process.env.TINYAI_OBS_CURSOR_DIR || join(homedir(), ".tinyai-observability", "cursors"), "claude-turn-cursors.json");
 }
-function collectPotentialFilePaths(value) {
-    const text = textFromUnknown(value);
-    const output = new Set();
-    const patterns = [
-        /(?:^|[\s"'`=:(])((?:\.{1,2}\/|\/|~\/)?[\w.@%+=:,~/-]+\.[A-Za-z0-9_+-]{1,16})(?=$|[\s"'`),;])/g,
-        /(?:^|[\s"'`=:(])((?:\.{1,2}\/|\/|~\/)?[\w.@%+=:,~/-]+\/[\w.@%+=:,~/-]+)(?=$|[\s"'`),;])/g
-    ];
-    for (const pattern of patterns) {
-        for (const match of text.matchAll(pattern)) {
-            const candidate = match[1]?.trim();
-            if (!candidate)
-                continue;
-            if (candidate.length > 500)
-                continue;
-            if (/^(https?:|mailto:|data:)/i.test(candidate))
-                continue;
-            if (candidate.includes("node_modules/") || candidate.includes(".git/"))
-                continue;
-            output.add(candidate.replace(/^file:\/\//, ""));
-        }
+async function loadClaudeTurnCursorStore() {
+    try {
+        const parsed = JSON.parse(await readFile(claudeTurnCursorStorePath(), "utf8"));
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
     }
-    return [...output].slice(0, 50);
+    catch {
+        return {};
+    }
 }
-function claudeSnapshotPathCandidates(snapshot) {
-    const paths = new Set();
-    for (const change of snapshot.code_changes || []) {
-        if (change.file_path)
-            paths.add(change.file_path);
-    }
-    for (const toolCall of snapshot.tool_calls || []) {
-        for (const path of collectPotentialFilePaths(toolCall))
-            paths.add(path);
-    }
-    for (const step of snapshot.process_steps || []) {
-        for (const path of collectPotentialFilePaths(step))
-            paths.add(path);
-    }
-    return [...paths].slice(0, 50);
+async function saveClaudeTurnCursorStore(store) {
+    const target = claudeTurnCursorStorePath();
+    await mkdir(dirname(target), { recursive: true });
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    await rename(tmp, target);
 }
-function hasClaudeExternalWriteSignal(snapshot) {
-    for (const toolCall of snapshot.tool_calls || []) {
-        const name = String(toolCall.tool_name || "").toLowerCase();
-        const raw = textFromUnknown([toolCall.arguments_raw, toolCall.result_raw]).toLowerCase();
-        if (/(bash|shell|terminal|run_command|run_in_terminal)/.test(name))
-            return true;
-        if (/(^|\s)(python|python3|node|perl|ruby|sh|bash)\s/.test(raw) && /(write|append|open\(|>>|>\s*[^&])/.test(raw))
-            return true;
+function claudeTurnCursorKey(filePath) {
+    return stableEventId(`claude-turn-cursor:${filePath}`);
+}
+async function startOffsetForClaudeTurnFile(filePath, sessionId) {
+    const st = await stat(filePath);
+    const store = await loadClaudeTurnCursorStore();
+    const key = claudeTurnCursorKey(filePath);
+    const existing = store[key];
+    if (!existing) {
+        store[key] = {
+            file_path: filePath,
+            read_offset: st.size,
+            file_size: st.size,
+            session_id: sessionId,
+            updated_at: new Date().toISOString()
+        };
+        await saveClaudeTurnCursorStore(store);
+        return { startOffset: st.size, initializedAtEof: true };
     }
-    for (const step of snapshot.process_steps || []) {
-        const text = `${step.step_type || ""}\n${step.text || ""}`.toLowerCase();
-        if (/(bash|terminal|shell|ran command|executed command)/.test(text) && /(write|append|created|edited|modified|>>|>\s*[^&])/.test(text)) {
-            return true;
-        }
-    }
-    return false;
+    return { startOffset: Math.max(0, Math.min(existing.read_offset, st.size)), initializedAtEof: false };
+}
+async function commitClaudeTurnCursor(filePath, nextOffset, sessionId) {
+    const st = await stat(filePath);
+    const store = await loadClaudeTurnCursorStore();
+    const key = claudeTurnCursorKey(filePath);
+    const existing = store[key];
+    if (existing && existing.read_offset > nextOffset)
+        return;
+    store[key] = {
+        file_path: filePath,
+        read_offset: Math.max(0, Math.min(nextOffset, st.size)),
+        file_size: st.size,
+        session_id: sessionId || existing?.session_id,
+        updated_at: new Date().toISOString()
+    };
+    await saveClaudeTurnCursorStore(store);
+}
+function objectRecord(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+if (eventType === "task_start" && tool === "claude" && typeof hookSessionFile === "string") {
+    await startOffsetForClaudeTurnFile(hookSessionFile, hookSessionId);
 }
 async function appendClaudeWorkspaceDiffFallbackEvents(snapshot, options) {
     if (!hasClaudeExternalWriteSignal(snapshot))
         return;
-    const paths = claudeSnapshotPathCandidates(snapshot);
+    const paths = claudeWorkspaceDiffPathCandidates(snapshot);
     if (paths.length === 0)
         return;
     const diffRoot = snapshot.cwd || options.workspacePath;
@@ -143,7 +147,7 @@ async function appendClaudeWorkspaceDiffFallbackEvents(snapshot, options) {
         eventId: stableEventId(`claude:turn_workspace_diff:${options.eventId}:${diff.diff_hash}`)
     }));
 }
-if (eventType === "task_end" || eventType === "code_change") {
+if (eventType === "code_change" || (eventType === "task_end" && tool !== "codex")) {
     events.push(makeEvent({
         tool,
         eventType: "code_change",
@@ -212,27 +216,31 @@ if (eventType === "push_snapshot") {
 if (eventType === "turn_snapshot" && tool === "claude") {
     events.length = 0;
     const captureText = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_CAPTURE_CONVERSATION_TEXT || "").toLowerCase());
-    const hookSessionFile = hookPayload.transcript_path ||
-        hookPayload.transcriptPath ||
-        hookPayload.session_file ||
-        hookPayload.sessionFile;
+    const sessionFile = typeof hookSessionFile === "string" ? hookSessionFile : undefined;
+    const cursorStart = sessionFile ? await startOffsetForClaudeTurnFile(sessionFile, hookSessionId) : undefined;
     try {
         const snapshots = await captureLatestClaudeTurnSnapshots({
             includeText: captureText,
             sessionId: hookSessionId,
             workspacePath,
-            sessionFile: typeof hookSessionFile === "string" ? hookSessionFile : undefined,
-            latestOnly: true
+            sessionFile,
+            latestOnly: false,
+            startOffset: cursorStart?.startOffset
         });
         for (const snapshot of snapshots) {
+            if (snapshot.turn.status === "incomplete") {
+                continue;
+            }
             const eventId = stableEventId(`claude:turn:${snapshot.session_id}:${snapshot.request_id}:${snapshot.response_id}`);
+            const sourceInfo = objectRecord(snapshot.source_files?.claude_project_jsonl);
+            const nextOffset = Number(sourceInfo?.next_offset);
             events.push(makeEvent({
                 tool,
                 eventType: "turn_snapshot",
                 taskId: hookTaskId || snapshot.request_id,
                 sessionId: snapshot.session_id,
                 workspacePath: snapshot.cwd || workspacePath,
-                payload: { ...snapshot },
+                payload: { ...snapshot, capture_cursor: cursorStart },
                 sourceConfidence: "derived",
                 eventId,
                 model: snapshot.resolved_model || snapshot.model
@@ -244,6 +252,9 @@ if (eventType === "turn_snapshot" && tool === "claude") {
                 workspacePath: snapshot.cwd || workspacePath,
                 captureText
             });
+            if (sessionFile && Number.isFinite(nextOffset) && nextOffset >= 0) {
+                afterSuccessfulUpload.push(() => commitClaudeTurnCursor(sessionFile, nextOffset, snapshot.session_id));
+            }
         }
     }
     catch (error) {
@@ -272,23 +283,36 @@ if (eventType === "task_end") {
         const snapshot = await captureLatestConversation(tool, {
             includeText: captureText,
             sessionId: hookSessionId,
-            sessionFile: typeof hookSessionFile === "string" ? hookSessionFile : undefined
+            sessionFile: typeof hookSessionFile === "string" ? hookSessionFile : undefined,
+            latestTurnOnly: tool === "codex"
         });
-        const conversationSignature = stableEventId(JSON.stringify(snapshot.messages.map((message) => [message.role, message.message_id || "", message.text_hash])));
-        events.push(makeEvent({
-            tool,
-            eventType: "conversation_snapshot",
-            taskId: hookTaskId,
-            sessionId: snapshot.session_id,
-            workspacePath,
-            payload: { ...snapshot },
-            sourceConfidence: "derived",
-            eventId: stableEventId(`${tool}:conversation:${snapshot.session_id || hookTaskId}:${conversationSignature}`),
-            model: snapshot.resolved_model || snapshot.model
-        }));
+        const conversationSignature = tool === "codex"
+            ? codexSnapshotSignature(snapshot)
+            : stableEventId(JSON.stringify(snapshot.messages.map((message) => [message.role, message.message_id || "", message.text_hash])));
+        if (tool === "codex") {
+            events.length = 0;
+            events.push(buildCodexTurnSnapshotEvent(snapshot, {
+                taskId: hookTaskId,
+                workspacePath: snapshot.cwd || workspacePath,
+                snapshotKind: "codex_hook_task_end"
+            }));
+        }
+        else {
+            events.push(makeEvent({
+                tool,
+                eventType: "conversation_snapshot",
+                taskId: hookTaskId,
+                sessionId: snapshot.session_id,
+                workspacePath,
+                payload: { ...snapshot },
+                sourceConfidence: "derived",
+                eventId: stableEventId(`${tool}:conversation:${snapshot.session_id || hookTaskId}:${conversationSignature}`),
+                model: snapshot.resolved_model || snapshot.model
+            }));
+        }
         // Generate agent_process_snapshot when process_steps exist
         const processSteps = snapshot.process_steps || [];
-        if (processSteps.length > 0) {
+        if (tool !== "codex" && processSteps.length > 0) {
             const visibleReasoning = processSteps.filter((s) => s.kind === "thinking");
             events.push(makeEvent({
                 tool,
@@ -319,7 +343,7 @@ if (eventType === "task_end") {
         }
         // Generate code_change events for code edits extracted from tool args
         const codeEdits = snapshot.code_edits || [];
-        if (codeEdits.length > 0) {
+        if (tool !== "codex" && codeEdits.length > 0) {
             const linesAdded = codeEdits.reduce((sum, e) => sum + e.lines_added, 0);
             const linesDeleted = codeEdits.reduce((sum, e) => sum + e.lines_deleted, 0);
             events.push(makeEvent({
@@ -356,5 +380,9 @@ if (eventType === "task_end") {
     }
 }
 if (events.length > 0) {
-    await new CollectorClient({ tool, workspacePath }).upload(tool, events);
+    const result = await new CollectorClient({ tool, workspacePath }).upload(tool, events);
+    if (!result.queued) {
+        for (const commit of afterSuccessfulUpload)
+            await commit();
+    }
 }

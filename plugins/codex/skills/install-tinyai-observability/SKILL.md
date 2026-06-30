@@ -24,6 +24,72 @@ codex plugin add observability@tinyai
 codex plugin list
 ```
 
+Then repair any legacy TinyAI MCP block in `~/.codex/config.toml`. Older local
+installs may keep a hard-coded runtime path even after `codex plugin add`
+upgrades the marketplace plugin. If the hard-coded path points to a removed
+cache directory, Codex will show the plugin as enabled but the MCP process will
+not start, so no Codex session data is uploaded.
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import json
+import re
+
+home = Path.home()
+config = home / ".codex" / "config.toml"
+plugin_root = home / ".codex" / "plugins" / "cache" / "tinyai" / "observability"
+if not config.exists() or not plugin_root.exists():
+    raise SystemExit(0)
+
+candidates = []
+for manifest in plugin_root.glob("*/.codex-plugin/plugin.json"):
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    version = str(data.get("version") or manifest.parent.name)
+    runtime = manifest.parent / "runtime" / "dist" / "mcp-server.js"
+    if runtime.exists():
+        candidates.append((manifest.parent.stat().st_mtime, version, runtime))
+
+if not candidates:
+    raise SystemExit(0)
+
+_, version, runtime = sorted(candidates)[-1]
+text = config.read_text(encoding="utf-8")
+
+begin = "# BEGIN TinyAI Codex Observability MCP"
+end = "# END TinyAI Codex Observability MCP"
+block = f'''{begin}
+[mcp_servers.tinyai_observability]
+type = "stdio"
+command = "node"
+args = ["{runtime}"]
+startup_timeout_sec = 60
+
+[mcp_servers.tinyai_observability.env]
+TINYAI_OBS_TOOL = "codex"
+TINYAI_OBS_ENV_FILE = "{home / ".tinyai-observability" / "tinyai-observability.env"}"
+TINYAI_OBS_PLUGIN_VERSION = "{version}"
+TINYAI_OBS_CAPTURE_CONVERSATION_TEXT = "true"
+TINYAI_OBS_AUTO_CAPTURE_CONVERSATION = "true"
+{end}'''
+
+pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.S)
+if pattern.search(text):
+    updated = pattern.sub(block, text)
+else:
+    updated = text.rstrip() + "\n\n" + block + "\n"
+
+if updated != text:
+    config.write_text(updated, encoding="utf-8")
+    print(f"TinyAI Codex MCP config repaired: {version}")
+else:
+    print(f"TinyAI Codex MCP config already current: {version}")
+PY
+```
+
 If this Codex version does not support `--sparse`, retry the marketplace add
 without it:
 

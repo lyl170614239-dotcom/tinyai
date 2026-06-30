@@ -2,7 +2,8 @@
 import { cwd } from "node:process";
 import { CollectorClient } from "./client.js";
 import { loadTinyAiEnvFile, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool } from "./config.js";
-import { captureLatestConversation } from "./conversation.js";
+import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
+import { captureLatestConversation, commitConversationCursor } from "./conversation.js";
 import { makeEvent, stableEventId } from "./event-schema.js";
 import { commitSnapshot, diffSummary, installGitHooks, markAiActivity, pushSnapshot, recordAiLineSnapshot } from "./git.js";
 import { readSpec, searchSpecs } from "./spec-detector.js";
@@ -316,6 +317,24 @@ async function handleToolCall(name, args) {
     if (name === "tinyai_conversation.capture_latest") {
         await markAiActivity(workspacePath, { tool, source: "tinyai_conversation.capture_latest" });
         const snapshot = await captureLatestConversation(tool, { latestTurnOnly: tool === "codex" });
+        if (snapshot.message_count <= 0 && !snapshot.process_steps?.length && !snapshot.code_edits?.length) {
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify({
+                            ok: false,
+                            skipped: true,
+                            reason: snapshot.capture_cursor?.initialized_at_eof
+                                ? "large transcript initialized at EOF; future appends will be captured incrementally"
+                                : "no new complete transcript records since last cursor",
+                            session_id: snapshot.session_id,
+                            cursor: snapshot.capture_cursor
+                        }, null, 2)
+                    }
+                ]
+            };
+        }
         if (tool === "codex" && snapshot.latest_turn_complete === false) {
             return {
                 content: [
@@ -333,27 +352,27 @@ async function handleToolCall(name, args) {
             };
         }
         const eventWorkspacePath = snapshot.cwd || workspacePath;
-        const snapshotSignature = stableEventId(JSON.stringify({
-            messages: snapshot.messages.map((message) => [message.role, message.message_id || "", message.text_hash]),
-            process: (snapshot.process_steps || []).map((step) => [step.kind, step.text_hash, step.tool_name || "", step.status || ""]),
-            code: snapshot.code_edits || []
-        }));
-        const events = [
-            makeEvent({
-                tool,
-                eventType: "conversation_snapshot",
-                sessionId: snapshot.session_id,
-                workspacePath: eventWorkspacePath,
-                payload: { ...snapshot },
-                sourceConfidence: "derived",
-                eventId: tool === "codex"
-                    ? stableEventId(`codex:mcp-conversation:${snapshot.session_id || "unknown"}:${snapshotSignature}`)
-                    : undefined
-            })
-        ];
+        const snapshotSignature = codexSnapshotSignature(snapshot);
+        const events = tool === "codex"
+            ? [
+                buildCodexTurnSnapshotEvent(snapshot, {
+                    workspacePath: eventWorkspacePath,
+                    snapshotKind: "codex_mcp_capture"
+                })
+            ]
+            : [
+                makeEvent({
+                    tool,
+                    eventType: "conversation_snapshot",
+                    sessionId: snapshot.session_id,
+                    workspacePath: eventWorkspacePath,
+                    payload: { ...snapshot },
+                    sourceConfidence: "derived"
+                })
+            ];
         // Generate agent_process_snapshot when process_steps exist
         const processSteps = snapshot.process_steps || [];
-        if (processSteps.length > 0) {
+        if (tool !== "codex" && processSteps.length > 0) {
             const visibleReasoning = processSteps.filter((s) => s.kind === "thinking");
             events.push(makeEvent({
                 tool,
@@ -377,14 +396,11 @@ async function handleToolCall(name, args) {
                     visible_reasoning: visibleReasoning,
                     process_steps: processSteps
                 },
-                sourceConfidence: "derived",
-                eventId: tool === "codex"
-                    ? stableEventId(`codex:mcp-process:${snapshot.session_id || "unknown"}:${snapshotSignature}`)
-                    : undefined
+                sourceConfidence: "derived"
             }));
         }
         const codeEdits = snapshot.code_edits || [];
-        if (codeEdits.length > 0) {
+        if (tool !== "codex" && codeEdits.length > 0) {
             const linesAdded = codeEdits.reduce((sum, e) => sum + e.lines_added, 0);
             const linesDeleted = codeEdits.reduce((sum, e) => sum + e.lines_deleted, 0);
             events.push(makeEvent({
@@ -404,13 +420,11 @@ async function handleToolCall(name, args) {
                     capture_note: "Derived from tool arguments (oldStr/newStr) extracted from local transcript via MCP.",
                     files: codeEdits
                 },
-                sourceConfidence: "derived",
-                eventId: tool === "codex"
-                    ? stableEventId(`codex:mcp-code:${snapshot.session_id || "unknown"}:${snapshotSignature}`)
-                    : undefined
+                sourceConfidence: "derived"
             }));
         }
         await client.upload(tool, events);
+        await commitConversationCursor(snapshot);
         return {
             content: [
                 {
@@ -452,69 +466,20 @@ async function autoCaptureLatestCodexConversation() {
         if (snapshot.latest_turn_complete === false)
             return;
         const eventWorkspacePath = snapshot.cwd || workspacePath;
-        const signature = stableEventId(JSON.stringify({
-            messages: snapshot.messages.map((message) => [message.role, message.message_id || "", message.text_hash]),
-            process: (snapshot.process_steps || []).map((step) => [step.kind, step.text_hash, step.tool_name || "", step.status || ""]),
-            code: snapshot.code_edits || []
-        }));
+        const signature = codexSnapshotSignature(snapshot);
         if (signature === lastCodexAutoCaptureSignature)
             return;
         const sessionId = snapshot.session_id;
         const taskId = sessionId || `codex-auto-${signature}`.slice(0, 64);
         const events = [
-            makeEvent({
-                tool: "codex",
-                eventType: "conversation_snapshot",
+            buildCodexTurnSnapshotEvent(snapshot, {
                 taskId,
-                sessionId,
                 workspacePath: eventWorkspacePath,
-                payload: { ...snapshot, snapshot_kind: "codex_mcp_auto_capture" },
-                sourceConfidence: "derived",
-                eventId: stableEventId(`codex:auto-conversation:${sessionId || "unknown"}:${signature}`)
+                snapshotKind: "codex_mcp_auto_capture"
             })
         ];
-        const processSteps = snapshot.process_steps || [];
-        if (processSteps.length > 0) {
-            events.push(makeEvent({
-                tool: "codex",
-                eventType: "agent_process_snapshot",
-                taskId,
-                sessionId,
-                workspacePath: eventWorkspacePath,
-                payload: {
-                    snapshot_kind: "codex_mcp_auto_process",
-                    session_id: sessionId,
-                    include_text: includeText,
-                    process_steps: processSteps,
-                    process_step_count: processSteps.length,
-                    capture_limitations: "Automatically captured from locally persisted Codex session data. Reasoning entries are visible or persisted summaries, not internal chain-of-thought."
-                },
-                sourceConfidence: "derived",
-                eventId: stableEventId(`codex:auto-process:${sessionId || "unknown"}:${signature}`)
-            }));
-        }
-        const codeEdits = snapshot.code_edits || [];
-        if (codeEdits.length > 0) {
-            events.push(makeEvent({
-                tool: "codex",
-                eventType: "code_change",
-                taskId,
-                sessionId,
-                workspacePath: eventWorkspacePath,
-                payload: {
-                    snapshot_kind: "codex_tool_edit",
-                    session_id: sessionId,
-                    files_changed: new Set(codeEdits.map((edit) => edit.file_path)).size,
-                    lines_added: codeEdits.reduce((sum, edit) => sum + edit.lines_added, 0),
-                    lines_deleted: codeEdits.reduce((sum, edit) => sum + edit.lines_deleted, 0),
-                    files: codeEdits,
-                    include_text: true
-                },
-                sourceConfidence: "derived",
-                eventId: stableEventId(`codex:auto-code:${sessionId || "unknown"}:${signature}`)
-            }));
-        }
         await client.upload("codex", events);
+        await commitConversationCursor(snapshot);
         lastCodexAutoCaptureSignature = signature;
     }
     catch {

@@ -401,16 +401,37 @@ def _dedupe_session_messages(messages: list[AiMessage]) -> list[AiMessage]:
 
 
 def _dedupe_session_turns(turns: list[AiTurn]) -> list[AiTurn]:
-    """Return one display turn per turn index, preferring the most complete row."""
-    by_index: dict[int, AiTurn] = {}
+    """Return one display turn per logical request, preferring the most complete row."""
+    open_statuses = {"in_progress", "incomplete", "active", "idle", "streaming"}
+
+    def score(turn: AiTurn) -> tuple[int, int, int, int, int, int]:
+        status = str(turn.status or "").lower()
+        return (
+            int(status not in open_statuses),
+            int(bool(turn.completed_at)),
+            int(bool(turn.assistant_message_id)),
+            int(bool(turn.user_message_id)),
+            int(bool(turn.response_id)),
+            int(bool(turn.request_id)),
+        )
+
+    by_request: dict[str, AiTurn] = {}
+    no_request: list[AiTurn] = []
     for turn in turns:
+        if not turn.request_id:
+            no_request.append(turn)
+            continue
+        existing = by_request.get(turn.request_id)
+        if existing is None or score(turn) > score(existing):
+            by_request[turn.request_id] = turn
+
+    by_index: dict[int, AiTurn] = {}
+    for turn in [*by_request.values(), *no_request]:
         existing = by_index.get(turn.turn_index)
         if existing is None:
             by_index[turn.turn_index] = turn
             continue
-        existing_score = int(bool(existing.request_id)) + int(bool(existing.response_id)) + int(bool(existing.completed_at))
-        current_score = int(bool(turn.request_id)) + int(bool(turn.response_id)) + int(bool(turn.completed_at))
-        if current_score > existing_score:
+        if score(turn) > score(existing):
             by_index[turn.turn_index] = turn
     return [by_index[index] for index in sorted(by_index)]
 
@@ -708,6 +729,7 @@ def _code_change_display_priority(change: AiCodeChange) -> int:
         "copilot_turn_tool_patch": 20,
         "copilot_turn_editor_delta": 10,
         "claude_turn_workspace_diff": 30,
+        "claude_turn_bash_delta": 25,
         "claude_turn_tool_patch": 20,
         "claude_turn_editor_delta": 10,
         "codex_turn_workspace_diff": 30,
@@ -724,6 +746,7 @@ def _is_turn_code_snapshot(change: AiCodeChange) -> bool:
         "copilot_turn_tool_patch",
         "copilot_turn_editor_delta",
         "claude_turn_workspace_diff",
+        "claude_turn_bash_delta",
         "claude_turn_tool_patch",
         "claude_turn_editor_delta",
         "codex_turn_workspace_diff",
@@ -773,6 +796,7 @@ def list_code_changes(
             "copilot_turn_tool_patch",
             "copilot_turn_editor_delta",
             "claude_turn_workspace_diff",
+            "claude_turn_bash_delta",
             "claude_turn_tool_patch",
             "claude_turn_editor_delta",
             "codex_turn_workspace_diff",

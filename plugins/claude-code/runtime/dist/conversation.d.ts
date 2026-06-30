@@ -86,6 +86,16 @@ type CapturedUsageTotals = {
     elapsed_ms: number;
     copilot_credits: number;
 };
+type CaptureCursorMetadata = {
+    tool: "codex" | "claude";
+    key: string;
+    file_path: string;
+    previous_offset: number;
+    next_offset: number;
+    file_size: number;
+    line_count: number;
+    initialized_at_eof?: boolean;
+};
 export interface ConversationSnapshot {
     session_id?: string;
     session_file: string;
@@ -114,7 +124,9 @@ export interface ConversationSnapshot {
     model?: string;
     resolved_model?: string;
     latest_turn_complete?: boolean;
+    capture_cursor?: CaptureCursorMetadata;
 }
+export declare function commitConversationCursor(snapshot: ConversationSnapshot): Promise<boolean>;
 export declare function latestCodexTurnSnapshot(snapshot: ConversationSnapshot): ConversationSnapshot;
 export declare function captureLatestCodexConversation(options?: {
     includeText?: boolean;

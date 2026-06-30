@@ -8,7 +8,7 @@ type ClaudeMessage = {
 };
 type ClaudeProcessStep = {
     step_id: string;
-    step_type: "assistant_progress" | "visible_reasoning" | "tool_call" | "tool_result" | "error";
+    step_type: "assistant_progress" | "visible_reasoning" | "tool_call" | "tool_result" | "context" | "error";
     text?: string;
     text_hash?: string;
     source: "claude_project_jsonl";
@@ -18,7 +18,7 @@ type ClaudeProcessStep = {
     status?: string;
     occurred_at?: string;
     actor_path: "top";
-    actor_type: "assistant";
+    actor_type: "assistant" | "system";
 };
 type ClaudeToolCall = {
     step_id: string;
@@ -129,17 +129,21 @@ export type ClaudeTurnSnapshot = {
             sha256?: string;
             mtime_ms?: number;
             size_bytes?: number;
+            read_offset?: number;
+            next_offset?: number;
+            hash_scope?: "full_file" | "read_segment";
         };
         parser_version: string;
         capture_limitations: string;
     };
 };
-export declare const CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.2";
+export declare const CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.3";
 export declare function captureLatestClaudeTurnSnapshots(options?: {
     includeText?: boolean;
     sessionFile?: string;
     sessionId?: string;
     workspacePath?: string;
     latestOnly?: boolean;
+    startOffset?: number;
 }): Promise<ClaudeTurnSnapshot[]>;
 export {};

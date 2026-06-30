@@ -418,6 +418,38 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(len(normalized["spec_accesses"]), 1)
         self.assertEqual(normalized["spec_accesses"][0]["doc_path"], "openspec/specs/刘芸隆.md")
 
+    def test_file_level_zero_line_counts_do_not_fallback_to_payload_totals(self):
+        payload = {
+            "snapshot_kind": "claude_turn_bash_delta",
+            "lines_added": 74,
+            "lines_deleted": 87,
+            "files": [
+                {
+                    "snapshot_kind": "claude_turn_bash_delta",
+                    "file_path": "plugin-runtime/src/index.ts",
+                    "lines_added": 1,
+                    "lines_deleted": 0,
+                    "hunks": [
+                        {
+                            "old_start": 1,
+                            "old_lines": 1,
+                            "new_start": 1,
+                            "new_lines": 2,
+                            "lines": [
+                                {"line_type": "context", "old_line": 1, "new_line": 1, "text": "export * from \"./client.js\";"},
+                                {"line_type": "added", "new_line": 2, "text": "export * from \"./claude-bash-delta.js\";"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="code_change"), payload)
+
+        self.assertEqual(normalized["code_changes"][0]["lines_added"], 1)
+        self.assertEqual(normalized["code_changes"][0]["lines_deleted"], 0)
+
     def test_commit_snapshot_does_not_derive_spec_access(self):
         payload = {
             "snapshot_kind": "commit_snapshot",

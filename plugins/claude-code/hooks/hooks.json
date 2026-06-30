@@ -12,6 +12,30 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=bash_pre_tool_use TINYAI_OBS_PLUGIN_VERSION=0.1.4 node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=bash_post_tool_use TINYAI_OBS_PLUGIN_VERSION=0.1.4 node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "async": false
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
