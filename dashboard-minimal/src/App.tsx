@@ -461,13 +461,16 @@ function personName(item: { user_display_name?: string | null; username?: string
   return email.includes("@") ? email.split("@")[0] : "未知用户";
 }
 
-function personEmail(item: { user_email?: string | null; user_id?: string | null }) {
-  const email = item.user_email || item.user_id || "";
-  return email.includes("@") ? email : "未配置邮箱";
+function usableIdentity(value?: string | null) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return ["unknown", "user", "未配置邮箱"].includes(text.toLowerCase()) ? "" : text;
 }
 
 function pluginPersonKey(client: PluginClient) {
-  return (client.user_email || client.user_id || client.user_display_name || client.username || client.client_id || "unknown").trim().toLowerCase();
+  const name = usableIdentity(client.user_display_name) || usableIdentity(client.username);
+  const fallback = usableIdentity(client.user_email) || usableIdentity(client.user_id) || client.client_id || "unknown";
+  return (name || fallback).trim().toLowerCase();
 }
 
 function latestClient(clients: PluginClient[]) {
@@ -487,45 +490,30 @@ function groupPluginClients(clients: PluginClient[]): PluginClientGroup[] {
 
   const groups: PluginClientGroup[] = [];
   for (const [personKey, personClients] of byPerson.entries()) {
-    const knownMachines = uniqueValues(personClients.map((client) => client.machine_id || "").filter(Boolean));
-    if (knownMachines.length <= 1) {
-      const representative = latestClient(personClients);
-      groups.push({
-        key: `${personKey}:${knownMachines[0] || "unknown-machine"}`,
-        clients: personClients,
-        representative,
-        last_seen_at: representative.last_seen_at,
-        machine_id: knownMachines[0] || null,
-        plugin_versions: uniqueValues(personClients.map((client) => client.plugin_version || "").filter(Boolean)),
-        tools: uniqueValues(personClients.map((client) => client.tool || "").filter(Boolean)),
-      });
-      continue;
-    }
-
-    const byMachine = new Map<string, PluginClient[]>();
-    for (const client of personClients) {
-      const machineKey = client.machine_id || `unknown:${client.client_id}`;
-      byMachine.set(machineKey, [...(byMachine.get(machineKey) || []), client]);
-    }
-    for (const [machineKey, machineClients] of byMachine.entries()) {
-      const representative = latestClient(machineClients);
-      groups.push({
-        key: `${personKey}:${machineKey}`,
-        clients: machineClients,
-        representative,
-        last_seen_at: representative.last_seen_at,
-        machine_id: representative.machine_id,
-        plugin_versions: uniqueValues(machineClients.map((client) => client.plugin_version || "").filter(Boolean)),
-        tools: uniqueValues(machineClients.map((client) => client.tool || "").filter(Boolean)),
-      });
-    }
+    const representative = latestClient(personClients);
+    const machineIds = uniqueValues(personClients.map((client) => client.machine_id || "").filter(Boolean));
+    groups.push({
+      key: personKey,
+      clients: personClients,
+      representative,
+      last_seen_at: representative.last_seen_at,
+      machine_id: machineIds[0] || null,
+      plugin_versions: uniqueValues(personClients.map((client) => client.plugin_version || "").filter(Boolean)),
+      tools: sortTools(uniqueValues(personClients.map((client) => client.tool || "").filter(Boolean))),
+    });
   }
 
   return groups.sort((a, b) => (parseDate(b.last_seen_at)?.getTime() ?? 0) - (parseDate(a.last_seen_at)?.getTime() ?? 0));
 }
 
-function pluginDisplayName(client: PluginClient) {
-  return client.plugin_name || client.tool || "未知插件";
+function sortTools(tools: string[]) {
+  const preferred = ["copilot", "claude", "codex"];
+  return [...tools].sort((a, b) => {
+    const aIndex = preferred.indexOf(a);
+    const bIndex = preferred.indexOf(b);
+    if (aIndex !== -1 || bIndex !== -1) return (aIndex === -1 ? 99 : aIndex) - (bIndex === -1 ? 99 : bIndex);
+    return a.localeCompare(b);
+  });
 }
 
 function pluginGroupStatus(group: PluginClientGroup) {
@@ -534,7 +522,29 @@ function pluginGroupStatus(group: PluginClientGroup) {
 
 function pluginGroupFilterValue(group: PluginClientGroup) {
   const client = group.representative;
-  return client.username || client.user_id || client.user_email || client.user_display_name || "";
+  return usableIdentity(client.user_display_name)
+    || usableIdentity(client.username)
+    || usableIdentity(client.user_email)
+    || usableIdentity(client.user_id)
+    || "";
+}
+
+function pluginPersonSubtitle(group: PluginClientGroup) {
+  const client = group.representative;
+  const email = client.user_email || client.user_id || "";
+  if (email.includes("@")) return email;
+  const username = usableIdentity(client.username);
+  const displayName = usableIdentity(client.user_display_name);
+  if (username && username !== displayName) return username;
+  return `${group.clients.length} 个采集端`;
+}
+
+function pluginGroupVersionLabel(group: PluginClientGroup) {
+  if (!group.plugin_versions.length) return `${group.clients.length} 个采集端`;
+  const versionText = group.plugin_versions.length === 1
+    ? `v${group.plugin_versions[0]}`
+    : `${group.plugin_versions.length} 个版本`;
+  return `${group.clients.length} 个采集端 · ${versionText}`;
 }
 
 function PluginLoginPanel({
@@ -551,7 +561,7 @@ function PluginLoginPanel({
       <div className="plugin-login-head">
         <div>
           <h3>用户登录插件</h3>
-          <p>{groups.length ? `${fmtNumber(groups.length)} 个登录采集端` : "等待插件心跳"}</p>
+          <p>{groups.length ? `${fmtNumber(groups.length)} 个用户` : "等待插件心跳"}</p>
         </div>
         <Badge tone={groups.some((group) => pluginGroupStatus(group) === "online") ? "good" : "warn"}>
           {groups.filter((group) => pluginGroupStatus(group) === "online").length} 在线
@@ -576,13 +586,12 @@ function PluginLoginPanel({
               <span className={`plugin-login-dot ${online ? "online" : "offline"}`} />
               <span className="plugin-login-main">
                 <strong>{personName(client)}</strong>
-                <small>{personEmail(client)}</small>
+                <small>{pluginPersonSubtitle(group)}</small>
               </span>
               <span className="plugin-login-meta">
-                <span>{pluginDisplayName(client)}</span>
+                <span>{group.tools.join(" / ") || client.tool || "未知工具"}</span>
                 <small>
-                  {group.tools.join(" / ") || client.tool || "未知工具"}
-                  {group.plugin_versions.length ? ` · v${group.plugin_versions.join(" / v")}` : ""}
+                  {pluginGroupVersionLabel(group)}
                 </small>
                 <small>{online ? "在线" : "离线"} · {fmtTime(group.last_seen_at)}</small>
               </span>

@@ -486,12 +486,13 @@ input[type="date"]:focus,
 
 .plugin-login-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 0.9fr) minmax(0, 1.1fr);
-  align-items: center;
-  gap: 9px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: flex-start;
+  column-gap: 10px;
+  row-gap: 6px;
   width: 100%;
   min-width: 0;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--surface);
@@ -511,6 +512,9 @@ input[type="date"]:focus,
 }
 
 .plugin-login-dot {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  margin-top: 6px;
   width: 8px;
   height: 8px;
   border-radius: 999px;
@@ -531,7 +535,17 @@ input[type="date"]:focus,
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
+}
+
+.plugin-login-main {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.plugin-login-meta {
+  grid-column: 2;
+  grid-row: 2;
 }
 
 .plugin-login-main strong,
@@ -540,27 +554,32 @@ input[type="date"]:focus,
 .plugin-login-meta small {
   display: block;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .plugin-login-main strong {
   color: var(--text);
   font-size: 13px;
   font-weight: 850;
+  line-height: 1.25;
 }
 
 .plugin-login-main small,
 .plugin-login-meta small {
   color: var(--faint);
   font-size: 11px;
+  line-height: 1.35;
 }
 
 .plugin-login-meta span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  line-height: 1.3;
 }
 
 .plugin-login-empty {
