@@ -29,6 +29,10 @@ class PluginClient(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    __table_args__ = (
+        Index("ix_plugin_clients_last_seen", "last_seen_at"),
+    )
+
 
 class PluginHeartbeat(Base):
     __tablename__ = "plugin_heartbeats"
@@ -50,6 +54,7 @@ class PluginHeartbeat(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     __table_args__ = (
+        Index("ix_plugin_heartbeats_recent", "occurred_at"),
         Index("ix_plugin_heartbeats_client_time", "client_id", "occurred_at"),
         Index("ix_plugin_heartbeats_user_time", "user_id", "occurred_at"),
         Index("ix_plugin_heartbeats_team_time", "team", "occurred_at"),
@@ -350,6 +355,8 @@ class AiCodeChange(Base):
         Index("ix_ai_code_changes_event", "event_id"),
         Index("ix_ai_code_changes_request", "session_id", "request_id"),
         Index("ix_ai_code_changes_effective", "session_id", "is_effective"),
+        Index("ix_ai_code_changes_effective_time", "is_effective", "occurred_at", "id"),
+        Index("ix_ai_code_changes_type_effective_time", "change_type", "is_effective", "occurred_at", "id"),
     )
 
 

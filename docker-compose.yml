@@ -2,7 +2,9 @@ services:
   mysql:
     image: mysql:8.4
     container_name: tinyai-observability-mysql
-    command: ["--default-time-zone=+08:00"]
+    command:
+      - "--default-time-zone=+08:00"
+      - "--sort-buffer-size=4194304"
     environment:
       TZ: Asia/Shanghai
       MYSQL_DATABASE: ${MYSQL_DATABASE:-tinyobs}

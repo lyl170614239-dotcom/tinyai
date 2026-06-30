@@ -234,6 +234,17 @@ def _ensure_turn_snapshot_storage() -> None:
                 connection.execute(text("ALTER TABLE `ai_code_changes` ADD INDEX `ix_ai_code_changes_request` (`session_id`, `request_id`)"))
             if "ix_ai_code_changes_effective" not in indexes:
                 connection.execute(text("ALTER TABLE `ai_code_changes` ADD INDEX `ix_ai_code_changes_effective` (`session_id`, `is_effective`)"))
+            if "ix_ai_code_changes_effective_time" not in indexes:
+                connection.execute(
+                    text("ALTER TABLE `ai_code_changes` ADD INDEX `ix_ai_code_changes_effective_time` (`is_effective`, `occurred_at`, `id`)")
+                )
+            if "ix_ai_code_changes_type_effective_time" not in indexes:
+                connection.execute(
+                    text(
+                        "ALTER TABLE `ai_code_changes` "
+                        "ADD INDEX `ix_ai_code_changes_type_effective_time` (`change_type`, `is_effective`, `occurred_at`, `id`)"
+                    )
+                )
 
 
 def _ensure_line_attribution_storage() -> None:
@@ -381,12 +392,18 @@ def _ensure_multi_client_storage() -> None:
         if inspector.has_table("plugin_heartbeats"):
             indexes = {index["name"] for index in inspector.get_indexes("plugin_heartbeats")}
             heartbeat_indexes = {
+                "ix_plugin_heartbeats_recent": "(`occurred_at`)",
                 "ix_plugin_heartbeats_user_time": "(`user_id`, `occurred_at`)",
                 "ix_plugin_heartbeats_team_time": "(`team`, `occurred_at`)",
             }
             for index_name, columns_sql in heartbeat_indexes.items():
                 if index_name not in indexes:
                     connection.execute(text(f"ALTER TABLE `plugin_heartbeats` ADD INDEX `{index_name}` {columns_sql}"))
+
+        if inspector.has_table("plugin_clients"):
+            indexes = {index["name"] for index in inspector.get_indexes("plugin_clients")}
+            if "ix_plugin_clients_last_seen" not in indexes:
+                connection.execute(text("ALTER TABLE `plugin_clients` ADD INDEX `ix_plugin_clients_last_seen` (`last_seen_at`)"))
 
 
 def _ensure_ingest_job_storage() -> None:
