@@ -241,7 +241,7 @@ async function migrateLegacyCollectorUrl() {
   }
 }
 
-const PLUGIN_VERSION = "0.1.42";
+const PLUGIN_VERSION = "0.1.43";
 
 function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
   if (tool === "codex") return "tinyai-observability-codex";
@@ -2189,22 +2189,10 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
     const chatFingerprint = fileFingerprint(chat);
     const transcriptFingerprint = fileFingerprint(transcript);
     const cursor = cursors[sessionKey];
-    const hasReadableOffsets = Boolean(cursor?.chat_read_offset || cursor?.transcript_read_offset);
-    if (!options.includeHistory && !hasReadableOffsets) {
-      cursors[sessionKey] = {
-        chat_fingerprint: chatFingerprint,
-        transcript_fingerprint: transcriptFingerprint,
-        chat_read_offset: chat.size,
-        transcript_read_offset: transcript?.size,
-        initialized_at_eof: true,
-        processed_at: new Date().toISOString()
-      };
-      cursorChanged = true;
-      skippedUnchanged += 1;
-      continue;
-    }
+    const replayInitializedAtEof = !options.includeHistory && cursor?.initialized_at_eof === true;
     if (
       !options.includeHistory &&
+      !replayInitializedAtEof &&
       cursor?.chat_fingerprint === chatFingerprint &&
       cursor?.transcript_fingerprint === transcriptFingerprint
     ) {
@@ -2212,8 +2200,8 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
       continue;
     }
     try {
-      const chatReadOffset = options.includeHistory ? 0 : cursor?.chat_read_offset || 0;
-      const transcriptReadOffset = options.includeHistory ? 0 : cursor?.transcript_read_offset || 0;
+      const chatReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.chat_read_offset || 0;
+      const transcriptReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.transcript_read_offset || 0;
       const chatRead = await readJsonlRecords(chat.path, chatReadOffset);
       const transcriptRead = transcript ? await readJsonlRecords(transcript.path, transcriptReadOffset) : undefined;
       const chatEntries = chatRead.records;

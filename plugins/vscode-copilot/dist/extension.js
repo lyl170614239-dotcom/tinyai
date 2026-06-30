@@ -2778,7 +2778,7 @@ async function migrateLegacyCollectorUrl() {
     await settings.update("collectorUrl", DEFAULT_COLLECTOR_URL, vscode.ConfigurationTarget.Global);
   }
 }
-var PLUGIN_VERSION = "0.1.42";
+var PLUGIN_VERSION = "0.1.43";
 function pluginNameForTool(tool) {
   if (tool === "codex") return "tinyai-observability-codex";
   return "tinyai-observability-vscode";
@@ -3962,27 +3962,14 @@ async function captureCopilotLocalTranscripts(options = {}) {
     const chatFingerprint = fileFingerprint(chat2);
     const transcriptFingerprint = fileFingerprint(transcript);
     const cursor = cursors[sessionKey];
-    const hasReadableOffsets = Boolean(cursor?.chat_read_offset || cursor?.transcript_read_offset);
-    if (!options.includeHistory && !hasReadableOffsets) {
-      cursors[sessionKey] = {
-        chat_fingerprint: chatFingerprint,
-        transcript_fingerprint: transcriptFingerprint,
-        chat_read_offset: chat2.size,
-        transcript_read_offset: transcript?.size,
-        initialized_at_eof: true,
-        processed_at: (/* @__PURE__ */ new Date()).toISOString()
-      };
-      cursorChanged = true;
-      skippedUnchanged += 1;
-      continue;
-    }
-    if (!options.includeHistory && cursor?.chat_fingerprint === chatFingerprint && cursor?.transcript_fingerprint === transcriptFingerprint) {
+    const replayInitializedAtEof = !options.includeHistory && cursor?.initialized_at_eof === true;
+    if (!options.includeHistory && !replayInitializedAtEof && cursor?.chat_fingerprint === chatFingerprint && cursor?.transcript_fingerprint === transcriptFingerprint) {
       skippedUnchanged += 1;
       continue;
     }
     try {
-      const chatReadOffset = options.includeHistory ? 0 : cursor?.chat_read_offset || 0;
-      const transcriptReadOffset = options.includeHistory ? 0 : cursor?.transcript_read_offset || 0;
+      const chatReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.chat_read_offset || 0;
+      const transcriptReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.transcript_read_offset || 0;
       const chatRead = await readJsonlRecords(chat2.path, chatReadOffset);
       const transcriptRead = transcript ? await readJsonlRecords(transcript.path, transcriptReadOffset) : void 0;
       const chatEntries = chatRead.records;
