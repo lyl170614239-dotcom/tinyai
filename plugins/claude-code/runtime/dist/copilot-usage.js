@@ -86,12 +86,12 @@ function applyRequest(target, request) {
     }
     applyResult(target, request.result);
 }
-export function parseCopilotRequestUsage(entries) {
-    let sessionId;
-    let title;
-    let startedAt;
-    let nextRequestIndex = 0;
-    const usages = new Map();
+export function replayCopilotRequestUsageState(entries, base) {
+    let sessionId = base?.sessionId;
+    let title = base?.title;
+    let startedAt = base?.startedAt;
+    let nextRequestIndex = base?.nextRequestIndex ?? 0;
+    const usages = new Map((base?.requestUsage || []).map((usage) => [usage.request_index, { ...usage }]));
     const usageAt = (index) => {
         let usage = usages.get(index);
         if (!usage) {
@@ -133,8 +133,8 @@ export function parseCopilotRequestUsage(entries) {
             continue;
         }
         if (kind === 2 && path.length === 1 && path[0] === "requests" && Array.isArray(entry.v)) {
-            for (const request of entry.v)
-                registerRequest(request, nextRequestIndex);
+            const startIndex = typeof entry.i === "number" && Number.isInteger(entry.i) ? entry.i : nextRequestIndex;
+            entry.v.forEach((request, offset) => registerRequest(request, startIndex + offset));
             continue;
         }
         if (path.length < 3 || path[0] !== "requests" || typeof path[1] !== "number")
@@ -181,7 +181,16 @@ export function parseCopilotRequestUsage(entries) {
             }
         }
     }
-    const requestUsage = [...usages.values()].sort((left, right) => left.request_index - right.request_index);
+    return {
+        sessionId,
+        title,
+        startedAt,
+        nextRequestIndex,
+        requestUsage: [...usages.values()].sort((left, right) => left.request_index - right.request_index)
+    };
+}
+export function parsedCopilotUsageFromState(state) {
+    const requestUsage = [...state.requestUsage].sort((left, right) => left.request_index - right.request_index);
     const usageTotals = requestUsage.reduce((totals, usage) => ({
         prompt_tokens: totals.prompt_tokens + (usage.prompt_tokens ?? 0),
         output_tokens: totals.output_tokens + (usage.output_tokens ?? 0),
@@ -191,12 +200,15 @@ export function parseCopilotRequestUsage(entries) {
     }), { prompt_tokens: 0, output_tokens: 0, completion_tokens: 0, elapsed_ms: 0, copilot_credits: 0 });
     const resolvedModel = [...requestUsage].reverse().find((usage) => usage.model)?.model;
     return {
-        sessionId,
-        title,
-        startedAt,
+        sessionId: state.sessionId,
+        title: state.title,
+        startedAt: state.startedAt,
         resolvedModel,
         requestUsage,
         usageTotals,
         requestCount: requestUsage.length
     };
+}
+export function parseCopilotRequestUsage(entries) {
+    return parsedCopilotUsageFromState(replayCopilotRequestUsageState(entries));
 }

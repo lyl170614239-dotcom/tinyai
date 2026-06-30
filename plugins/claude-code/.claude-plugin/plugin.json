@@ -1,6 +1,6 @@
 {
   "name": "observability",
-  "version": "0.1.8",
+  "version": "0.1.11",
   "description": "Native TinyAI observability plugin for Claude Code specs and coding task telemetry.",
   "author": {
     "name": "TinyAI"

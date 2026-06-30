@@ -19,23 +19,26 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 Run these commands:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user --sparse .claude-plugin plugins/claude-code
-claude plugin install observability@tinyai --scope user
-claude plugin list
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace update tinyai
+claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
-If this Claude Code version does not support `--sparse`, retry the marketplace
-add without it:
+If the `tinyai` marketplace already exists but points to an old local checkout
+or stale cache, refresh the source first:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user
-claude plugin install observability@tinyai --scope user
-claude plugin list
+claude plugin marketplace remove tinyai
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace update tinyai
+claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
 ## Identity setup after install
 
-After `claude plugin list` confirms `observability@tinyai` is enabled, configure
+After `claude plugin install observability@tinyai` succeeds, configure
 the identity before telling the user installation is complete. Write both the
 generic TinyAI identity and the Claude-specific identity. Claude and Codex are
 separate plugins; use `TINYAI_OBS_CLAUDE_*` keys here, not
@@ -101,9 +104,7 @@ If the email is unknown, omit both `TINYAI_OBS_USER_EMAIL` and
 the smoke test fails.
 
 5. Ask the user to restart Claude Code or reload the VS Code Claude Code panel
-so the plugin process reloads the env file. The smoke test only proves that the
-collector can accept data; real conversation capture starts after Claude Code
-loads the updated hooks/MCP in a fresh process.
+so the plugin process reloads the env file.
 
 ## Collector smoke test after install
 
@@ -127,31 +128,6 @@ if ! curl -fsS "$HEALTH_URL" >/tmp/tinyai-claude-health.json; then
   exit 1
 fi
 
-PLUGIN_VERSION="${TINYAI_OBS_PLUGIN_VERSION:-}"
-if [ -z "$PLUGIN_VERSION" ]; then
-  PLUGIN_VERSION="$(python3 - <<'PY'
-from pathlib import Path
-import json
-
-root = Path.home() / ".claude" / "plugins" / "cache" / "tinyai" / "observability"
-candidates = []
-for manifest in root.glob("*/.claude-plugin/plugin.json"):
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    version = str(data.get("version") or manifest.parent.name)
-    runtime = manifest.parent / "runtime" / "dist" / "mcp-server.js"
-    hooks = manifest.parent / "hooks" / "hooks.json"
-    if runtime.exists() or hooks.exists():
-        candidates.append((manifest.parent.stat().st_mtime, version))
-
-print(sorted(candidates)[-1][1] if candidates else "")
-PY
-)"
-fi
-export TINYAI_OBS_PLUGIN_VERSION="${PLUGIN_VERSION:-unknown}"
-
 python3 - "$TINYAI_ENV" > /tmp/tinyai-claude-smoke.json <<'PY'
 import hashlib
 import json
@@ -172,7 +148,6 @@ username = env("TINYAI_OBS_CLAUDE_USER_NAME") or env("TINYAI_OBS_USER_NAME") or 
 email = env("TINYAI_OBS_CLAUDE_USER_EMAIL") or env("TINYAI_OBS_USER_EMAIL")
 user_id = env("TINYAI_OBS_CLAUDE_USER_ID") or env("TINYAI_OBS_USER_ID") or email or username
 display_name = env("TINYAI_OBS_CLAUDE_USER_DISPLAY_NAME") or env("TINYAI_OBS_USER_DISPLAY_NAME") or username
-plugin_version = env("TINYAI_OBS_PLUGIN_VERSION", "unknown")
 machine = platform.node() or socket.gethostname() or "unknown"
 host_hash = hashlib.sha256(machine.encode("utf-8")).hexdigest()[:32]
 event_id = hashlib.sha256(f"claude-install-smoke:{machine}:{time.time()}".encode("utf-8")).hexdigest()[:32]
@@ -180,7 +155,7 @@ occurred_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 payload = {
     "client_id": f"claude-install-smoke-{host_hash}",
     "plugin_name": "tinyai-observability-claude",
-    "plugin_version": plugin_version,
+    "plugin_version": "install-smoke",
     "username": username,
     "user_id": user_id,
     "user_email": email,
@@ -206,7 +181,6 @@ payload = {
                 "smoke_test": True,
                 "source": "install-tinyai-observability",
                 "env_file": sys.argv[1],
-                "expected_runtime_plugin_version": plugin_version,
             },
         }
     ],
@@ -241,23 +215,20 @@ echo "TinyAI Claude smoke test passed: collector accepted plugin_heartbeat."
 
 ```bash
 claude plugin marketplace update tinyai
-claude plugin update observability@tinyai
-claude plugin list
+claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
 ## Verify
 
-1. `claude plugin list` should show `observability@tinyai` enabled.
+1. `claude plugin marketplace list` should show the `tinyai` marketplace.
 2. The env file should contain both `TINYAI_OBS_USER_NAME` and
    `TINYAI_OBS_CLAUDE_USER_NAME`.
 3. The collector smoke test should pass and create a `tool=claude`
-   `plugin_heartbeat` with the installed plugin version. This smoke heartbeat
-   should not be treated as real conversation telemetry.
+   `plugin_heartbeat`.
 4. Restart Claude Code or reload the VS Code Claude Code panel.
 5. Ask a simple question in Claude Code.
-6. Check the TinyAI dashboard for a real `tool=claude` session under the
-   confirmed user. The real hook/MCP heartbeat and session data should use the
-   installed plugin version, not `install-smoke`.
+6. Check the TinyAI dashboard for a `tool=claude` session under the confirmed user.
 
 ## Notes
 

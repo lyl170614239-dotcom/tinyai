@@ -558,7 +558,11 @@ process.stdin.on("data", async (chunk) => {
         throw new Error("invalid request");
       }
       if (request.method === "initialize") {
-        respond(request.id, { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "tinyai-observability", version: "0.1.0" } });
+        respond(request.id, {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "tinyai-observability", version: process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0" }
+        });
         void markMcpInitialized();
       } else if (request.method === "tools/list") {
         respond(request.id, { tools });

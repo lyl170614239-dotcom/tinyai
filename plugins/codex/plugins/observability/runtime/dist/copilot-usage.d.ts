@@ -27,6 +27,15 @@ export type ParsedCopilotUsage = {
     usageTotals: UsageTotals;
     requestCount: number;
 };
+export type CopilotUsageReplayState = {
+    sessionId?: string;
+    title?: string;
+    startedAt?: string;
+    nextRequestIndex: number;
+    requestUsage: RequestUsage[];
+};
 type JsonRecord = Record<string, unknown>;
+export declare function replayCopilotRequestUsageState(entries: JsonRecord[], base?: CopilotUsageReplayState): CopilotUsageReplayState;
+export declare function parsedCopilotUsageFromState(state: CopilotUsageReplayState): ParsedCopilotUsage;
 export declare function parseCopilotRequestUsage(entries: JsonRecord[]): ParsedCopilotUsage;
 export {};
