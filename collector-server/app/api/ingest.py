@@ -37,6 +37,7 @@ from ..services.ingest_service import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["ingest"])
+_HIDDEN_RELATED_TURN = object()
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -404,7 +405,7 @@ def _dedupe_session_turns(turns: list[AiTurn]) -> list[AiTurn]:
     """Return one display turn per logical request, preferring the most complete row."""
     open_statuses = {"in_progress", "incomplete", "active", "idle", "streaming"}
 
-    def score(turn: AiTurn) -> tuple[int, int, int, int, int, int]:
+    def score(turn: AiTurn) -> tuple[int, int, int, int, int, int, datetime, datetime, int]:
         status = str(turn.status or "").lower()
         return (
             int(status not in open_statuses),
@@ -413,6 +414,9 @@ def _dedupe_session_turns(turns: list[AiTurn]) -> list[AiTurn]:
             int(bool(turn.user_message_id)),
             int(bool(turn.response_id)),
             int(bool(turn.request_id)),
+            turn.completed_at or datetime.min,
+            turn.created_at or datetime.min,
+            turn.id or 0,
         )
 
     by_request: dict[str, AiTurn] = {}
@@ -707,6 +711,37 @@ def _turn_index_for_time(turns: list[AiTurn], occurred_at: datetime, fallback: i
     return candidate.turn_index if candidate else None
 
 
+def _display_turn_index_for_record(turns: list[AiTurn], record: object, occurred_at: datetime | None = None) -> int | None | object:
+    turn_id = getattr(record, "turn_id", None)
+    if turn_id is not None:
+        for turn in turns:
+            if turn.id == turn_id:
+                return turn.turn_index
+        return _HIDDEN_RELATED_TURN
+
+    request_id = getattr(record, "request_id", None)
+    response_id = getattr(record, "response_id", None)
+    if request_id or response_id:
+        for turn in turns:
+            if request_id and turn.request_id != request_id:
+                continue
+            if response_id and turn.response_id != response_id:
+                continue
+            return turn.turn_index
+        return _HIDDEN_RELATED_TURN
+
+    fallback = getattr(record, "turn_index", None)
+    if fallback is not None:
+        matches = [turn for turn in turns if turn.turn_index == fallback]
+        if len(matches) == 1:
+            return fallback
+        return None
+
+    if occurred_at is not None:
+        return _turn_index_for_time(turns, occurred_at, None)
+    return None
+
+
 def _code_change_display_key(change: AiCodeChange) -> tuple[str, str, str, str]:
     diff_json = change.diff_json if isinstance(change.diff_json, dict) else {}
     file_path = str(change.file_path or diff_json.get("file_path") or "").replace("\\", "/")
@@ -755,8 +790,29 @@ def _is_turn_code_snapshot(change: AiCodeChange) -> bool:
     }
 
 
+def _is_displayable_code_change(change: AiCodeChange) -> bool:
+    if change.file_path:
+        return True
+    if (change.lines_added or 0) > 0 or (change.lines_deleted or 0) > 0:
+        return True
+    diff_json = change.diff_json if isinstance(change.diff_json, dict) else {}
+    if diff_json.get("file_path"):
+        return True
+    try:
+        files_changed = int(diff_json.get("files_changed") or 0)
+    except (TypeError, ValueError):
+        files_changed = 0
+    if files_changed > 0:
+        return True
+    return False
+
+
 def _preferred_code_changes(changes: list[AiCodeChange]) -> list[AiCodeChange]:
-    effective_changes = [change for change in changes if getattr(change, "is_effective", True) is not False]
+    effective_changes = [
+        change
+        for change in changes
+        if getattr(change, "is_effective", True) is not False and _is_displayable_code_change(change)
+    ]
     winners: dict[tuple[str, str, str, str], AiCodeChange] = {}
     for change in effective_changes:
         if not _is_turn_code_snapshot(change):
@@ -866,21 +922,35 @@ def get_session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
 
     messages_by_turn: dict[int, list[AiMessage]] = {}
     for message in messages:
-        messages_by_turn.setdefault(message.turn_index, []).append(message)
+        turn_index = _display_turn_index_for_record(turns, message, message.occurred_at)
+        if turn_index is not _HIDDEN_RELATED_TURN and turn_index is not None:
+            messages_by_turn.setdefault(turn_index, []).append(message)
     steps_by_turn: dict[int | None, list[AiProcessStep]] = {}
     for step in steps:
-        steps_by_turn.setdefault(_turn_index_for_time(turns, step.occurred_at, step.turn_index), []).append(step)
+        turn_index = _display_turn_index_for_record(turns, step, step.occurred_at)
+        if turn_index is _HIDDEN_RELATED_TURN:
+            continue
+        steps_by_turn.setdefault(turn_index, []).append(step)
     code_by_turn: dict[int | None, list[AiCodeChange]] = {}
     for change in code_changes:
-        code_by_turn.setdefault(_turn_index_for_time(turns, change.occurred_at, change.turn_index), []).append(change)
+        turn_index = _display_turn_index_for_record(turns, change, change.occurred_at)
+        if turn_index is _HIDDEN_RELATED_TURN:
+            continue
+        code_by_turn.setdefault(turn_index, []).append(change)
     code_by_turn = {turn_index: _preferred_code_changes(changes) for turn_index, changes in code_by_turn.items()}
     specs_by_turn: dict[int | None, list[AiSpecAccess]] = {}
     for access in spec_accesses:
-        specs_by_turn.setdefault(_turn_index_for_time(turns, access.occurred_at, access.turn_index), []).append(access)
+        turn_index = _display_turn_index_for_record(turns, access, access.occurred_at)
+        if turn_index is _HIDDEN_RELATED_TURN:
+            continue
+        specs_by_turn.setdefault(turn_index, []).append(access)
     usage_by_turn: dict[int | None, list[AiRequestUsage]] = {}
     for usage in request_usage:
         fallback_turn = usage.request_index + 1
-        usage_by_turn.setdefault(usage.turn_index if usage.turn_index is not None else fallback_turn, []).append(usage)
+        usage_turn_index = _display_turn_index_for_record(turns, usage, usage.occurred_at)
+        if usage_turn_index is _HIDDEN_RELATED_TURN:
+            continue
+        usage_by_turn.setdefault(usage_turn_index if usage_turn_index is not None else fallback_turn, []).append(usage)
 
     usage_totals = {
         "prompt_tokens": sum(usage.prompt_tokens or 0 for usage in request_usage),
@@ -915,6 +985,8 @@ def get_session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
             {
                 "id": turn.id,
                 "turn_index": turn.turn_index,
+                "request_id": turn.request_id,
+                "response_id": turn.response_id,
                 "status": turn.status,
                 "created_at": _beijing_iso(turn.created_at),
                 "completed_at": _beijing_iso(turn.completed_at) if turn.completed_at else None,

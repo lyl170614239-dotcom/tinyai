@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendFile, mkdtemp, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { appendFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -145,6 +146,30 @@ test("Claude bash delta returns no code payload for read-only commands with no f
     command: "cat README.md",
     sessionId: "session-bash",
     toolCallId: "tool-bash-readonly"
+  });
+
+  assert.equal(payload, undefined);
+});
+
+test("Claude bash delta ignores directory paths from read-only ls commands", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "tinyai-claude-bash-dir-"));
+  await mkdir(join(workspace, "plugins", "claude-code"), { recursive: true });
+  await writeFile(join(workspace, "plugins", "claude-code", "README.md"), "hello\n", "utf8");
+  execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: workspace });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: workspace });
+  execFileSync("git", ["add", "."], { cwd: workspace });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: workspace, stdio: "ignore" });
+
+  const before = await captureClaudeBashSnapshot(workspace, {
+    command: "ls -la plugins/",
+    toolCallId: "tool-bash-ls-dir",
+    extraPaths: ["plugins"]
+  });
+  const payload = await buildClaudeBashDeltaPayload(workspace, before, {
+    command: "ls -la plugins/",
+    sessionId: "session-bash",
+    toolCallId: "tool-bash-ls-dir"
   });
 
   assert.equal(payload, undefined);

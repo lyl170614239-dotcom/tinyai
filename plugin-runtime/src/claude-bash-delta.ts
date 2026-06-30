@@ -12,6 +12,7 @@ const execFileAsync = promisify(execFile);
 type SnapshotFile = {
   file_path: string;
   exists: boolean;
+  kind?: "file" | "directory" | "missing" | "other";
   size_bytes: number;
   sha256?: string;
   content_base64?: string;
@@ -91,6 +92,8 @@ async function dirtyFiles(workspacePath: string): Promise<string[]> {
 
 async function headFile(workspacePath: string, filePath: string): Promise<Buffer | undefined> {
   try {
+    const objectType = await git(workspacePath, ["cat-file", "-t", `HEAD:${filePath}`]);
+    if (objectType !== "blob") return undefined;
     const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", "show", `HEAD:${filePath}`], {
       cwd: workspacePath,
       encoding: "buffer",
@@ -115,18 +118,21 @@ function candidatePaths(workspacePath: string, command: string, extraPaths: stri
 async function snapshotFile(workspacePath: string, filePath: string): Promise<SnapshotFile> {
   const absolute = join(workspacePath, filePath);
   try {
-    const [fileStat, content] = await Promise.all([stat(absolute), readFile(absolute)]);
-    if (!fileStat.isFile()) return { file_path: filePath, exists: false, size_bytes: 0 };
+    const fileStat = await stat(absolute);
+    if (fileStat.isDirectory()) return { file_path: filePath, exists: false, kind: "directory", size_bytes: 0 };
+    if (!fileStat.isFile()) return { file_path: filePath, exists: false, kind: "other", size_bytes: 0 };
+    const content = await readFile(absolute);
     return {
       file_path: filePath,
       exists: true,
+      kind: "file",
       size_bytes: content.length,
       sha256: sha256(content),
       content_base64: content.toString("base64"),
       binary: isBinary(content)
     };
   } catch {
-    return { file_path: filePath, exists: false, size_bytes: 0 };
+    return { file_path: filePath, exists: false, kind: "missing", size_bytes: 0 };
   }
 }
 
@@ -227,6 +233,7 @@ async function unifiedDiff(before: Buffer, after: Buffer, filePath: string): Pro
 
 async function fileChange(workspacePath: string, filePath: string, before: SnapshotFile | undefined) {
   const after = await snapshotFile(workspacePath, filePath);
+  if (before?.kind === "directory" || after.kind === "directory") return undefined;
   const beforeBuffer = snapshotContent(before) ?? await headFile(workspacePath, filePath) ?? Buffer.alloc(0);
   const afterBuffer = snapshotContent(after) ?? Buffer.alloc(0);
   const beforeHash = sha256(beforeBuffer);

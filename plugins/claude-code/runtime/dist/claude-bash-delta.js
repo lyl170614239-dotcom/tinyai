@@ -48,6 +48,9 @@ async function dirtyFiles(workspacePath) {
 }
 async function headFile(workspacePath, filePath) {
     try {
+        const objectType = await git(workspacePath, ["cat-file", "-t", `HEAD:${filePath}`]);
+        if (objectType !== "blob")
+            return undefined;
         const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", "show", `HEAD:${filePath}`], {
             cwd: workspacePath,
             encoding: "buffer",
@@ -72,12 +75,16 @@ function candidatePaths(workspacePath, command, extraPaths = []) {
 async function snapshotFile(workspacePath, filePath) {
     const absolute = join(workspacePath, filePath);
     try {
-        const [fileStat, content] = await Promise.all([stat(absolute), readFile(absolute)]);
+        const fileStat = await stat(absolute);
+        if (fileStat.isDirectory())
+            return { file_path: filePath, exists: false, kind: "directory", size_bytes: 0 };
         if (!fileStat.isFile())
-            return { file_path: filePath, exists: false, size_bytes: 0 };
+            return { file_path: filePath, exists: false, kind: "other", size_bytes: 0 };
+        const content = await readFile(absolute);
         return {
             file_path: filePath,
             exists: true,
+            kind: "file",
             size_bytes: content.length,
             sha256: sha256(content),
             content_base64: content.toString("base64"),
@@ -85,7 +92,7 @@ async function snapshotFile(workspacePath, filePath) {
         };
     }
     catch {
-        return { file_path: filePath, exists: false, size_bytes: 0 };
+        return { file_path: filePath, exists: false, kind: "missing", size_bytes: 0 };
     }
 }
 export async function captureClaudeBashSnapshot(workspacePath, options) {
@@ -183,6 +190,8 @@ async function unifiedDiff(before, after, filePath) {
 }
 async function fileChange(workspacePath, filePath, before) {
     const after = await snapshotFile(workspacePath, filePath);
+    if (before?.kind === "directory" || after.kind === "directory")
+        return undefined;
     const beforeBuffer = snapshotContent(before) ?? await headFile(workspacePath, filePath) ?? Buffer.alloc(0);
     const afterBuffer = snapshotContent(after) ?? Buffer.alloc(0);
     const beforeHash = sha256(beforeBuffer);

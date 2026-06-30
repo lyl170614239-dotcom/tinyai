@@ -1,6 +1,7 @@
 type SnapshotFile = {
     file_path: string;
     exists: boolean;
+    kind?: "file" | "directory" | "missing" | "other";
     size_bytes: number;
     sha256?: string;
     content_base64?: string;

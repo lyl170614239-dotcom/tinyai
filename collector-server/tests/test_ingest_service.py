@@ -779,6 +779,121 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(len(detail["turns"][0]["user_messages"]), 1)
         self.assertEqual(len(detail["turns"][0]["assistant_messages"]), 1)
 
+    def test_session_detail_does_not_mix_same_index_different_request_evidence(self):
+        occurred = datetime(2026, 6, 30, 3, 42, tzinfo=timezone.utc)
+        self.db.add(
+            AiSession(
+                session_id="claude-mixed-session",
+                task_id="claude-mixed-session",
+                tool="claude",
+                status="completed",
+                title="给我看看系统架构",
+                started_at=occurred,
+                last_activity_at=occurred,
+            )
+        )
+        self.db.flush()
+        agent_turn = AiTurn(
+            session_id="claude-mixed-session",
+            task_id="claude-mixed-session",
+            turn_index=1,
+            request_id="request-agent",
+            response_id="response-agent",
+            status="in_progress",
+            created_at=occurred,
+            completed_at=occurred,
+        )
+        user_turn = AiTurn(
+            session_id="claude-mixed-session",
+            task_id="claude-mixed-session",
+            turn_index=1,
+            request_id="request-user",
+            response_id="response-user",
+            status="completed",
+            created_at=occurred,
+            completed_at=occurred,
+        )
+        self.db.add_all([agent_turn, user_turn])
+        self.db.flush()
+        self.db.add_all(
+            [
+                AiMessage(
+                    session_id="claude-mixed-session",
+                    task_id="claude-mixed-session",
+                    turn_id=agent_turn.id,
+                    turn_index=1,
+                    message_index=0,
+                    role="user",
+                    content="Explore the repository",
+                    occurred_at=occurred,
+                ),
+                AiMessage(
+                    session_id="claude-mixed-session",
+                    task_id="claude-mixed-session",
+                    turn_id=user_turn.id,
+                    turn_index=1,
+                    message_index=1,
+                    role="user",
+                    content="给我看看系统架构",
+                    occurred_at=occurred,
+                ),
+                AiProcessStep(
+                    session_id="claude-mixed-session",
+                    task_id="claude-mixed-session",
+                    turn_id=agent_turn.id,
+                    turn_index=1,
+                    request_id="request-agent",
+                    response_id="response-agent",
+                    step_index=1,
+                    step_type="tool_call",
+                    tool_name="run_in_terminal",
+                    content="ls -la plugins/",
+                    occurred_at=occurred,
+                ),
+                AiCodeChange(
+                    session_id="claude-mixed-session",
+                    task_id="claude-mixed-session",
+                    turn_id=agent_turn.id,
+                    turn_index=1,
+                    request_id="request-agent",
+                    response_id="response-agent",
+                    event_id="agent-bash-delta",
+                    file_path="plugins",
+                    change_type="claude_turn_bash_delta",
+                    snapshot_kind="claude_turn_bash_delta",
+                    lines_added=0,
+                    lines_deleted=6,
+                    is_effective=True,
+                    occurred_at=occurred,
+                ),
+                AiCodeChange(
+                    session_id="claude-mixed-session",
+                    task_id="claude-mixed-session",
+                    turn_index=None,
+                    event_id="empty-code-change",
+                    file_path=None,
+                    change_type="code_change",
+                    snapshot_kind="code_change",
+                    lines_added=0,
+                    lines_deleted=0,
+                    is_effective=True,
+                    diff_json={"files_changed": 0, "line_stats": {"has_line_level_diff": False}},
+                    occurred_at=occurred,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        detail = get_session_detail("claude-mixed-session", db=self.db)
+
+        self.assertEqual(len(detail["turns"]), 1)
+        self.assertEqual(detail["turns"][0]["request_id"], "request-user")
+        self.assertEqual([message["content"] for message in detail["turns"][0]["user_messages"]], ["给我看看系统架构"])
+        self.assertEqual(detail["turns"][0]["process_steps"], [])
+        self.assertEqual(detail["turns"][0]["code_changes"], [])
+        self.assertEqual(detail["unassigned_process_steps"], [])
+        self.assertEqual(detail["unassigned_code_changes"], [])
+
     def test_claude_segment_relative_turn_indexes_merge_by_request_id(self):
         def turn_event(
             event_id: str,
