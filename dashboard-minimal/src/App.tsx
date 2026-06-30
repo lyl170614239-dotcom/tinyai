@@ -524,6 +524,76 @@ function groupPluginClients(clients: PluginClient[]): PluginClientGroup[] {
   return groups.sort((a, b) => (parseDate(b.last_seen_at)?.getTime() ?? 0) - (parseDate(a.last_seen_at)?.getTime() ?? 0));
 }
 
+function pluginDisplayName(client: PluginClient) {
+  return client.plugin_name || client.tool || "未知插件";
+}
+
+function pluginGroupStatus(group: PluginClientGroup) {
+  return minutesSince(group.last_seen_at) <= 30 ? "online" : "offline";
+}
+
+function pluginGroupFilterValue(group: PluginClientGroup) {
+  const client = group.representative;
+  return client.username || client.user_id || client.user_email || client.user_display_name || "";
+}
+
+function PluginLoginPanel({
+  groups,
+  selectedUser,
+  onSelectUser,
+}: {
+  groups: PluginClientGroup[];
+  selectedUser: string;
+  onSelectUser: (username: string) => void;
+}) {
+  return (
+    <section className="plugin-login-panel">
+      <div className="plugin-login-head">
+        <div>
+          <h3>用户登录插件</h3>
+          <p>{groups.length ? `${fmtNumber(groups.length)} 个登录采集端` : "等待插件心跳"}</p>
+        </div>
+        <Badge tone={groups.some((group) => pluginGroupStatus(group) === "online") ? "good" : "warn"}>
+          {groups.filter((group) => pluginGroupStatus(group) === "online").length} 在线
+        </Badge>
+      </div>
+      <div className="plugin-login-list">
+        {groups.length === 0 ? (
+          <div className="plugin-login-empty">暂无插件登录记录</div>
+        ) : groups.slice(0, 6).map((group) => {
+          const client = group.representative;
+          const filterValue = pluginGroupFilterValue(group);
+          const active = Boolean(filterValue && selectedUser === filterValue);
+          const online = pluginGroupStatus(group) === "online";
+          return (
+            <button
+              className={`plugin-login-item ${active ? "active" : ""}`}
+              key={group.key}
+              onClick={() => filterValue && onSelectUser(filterValue)}
+              disabled={!filterValue}
+              title={identityLabel(client) || client.client_id}
+            >
+              <span className={`plugin-login-dot ${online ? "online" : "offline"}`} />
+              <span className="plugin-login-main">
+                <strong>{personName(client)}</strong>
+                <small>{personEmail(client)}</small>
+              </span>
+              <span className="plugin-login-meta">
+                <span>{pluginDisplayName(client)}</span>
+                <small>
+                  {group.tools.join(" / ") || client.tool || "未知工具"}
+                  {group.plugin_versions.length ? ` · v${group.plugin_versions.join(" / v")}` : ""}
+                </small>
+                <small>{online ? "在线" : "离线"} · {fmtTime(group.last_seen_at)}</small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function readableValue(value: unknown, fallback = ""): string {
   if (typeof value === "string") return value.trim() || fallback;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -2347,6 +2417,11 @@ export default function App() {
                   </button>
                 ))}
             </nav>
+            <PluginLoginPanel
+              groups={pluginClientGroups}
+              selectedUser={selectedUser}
+              onSelectUser={handleUserChange}
+            />
           </div>
         </aside>
 

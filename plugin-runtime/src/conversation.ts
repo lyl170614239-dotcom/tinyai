@@ -219,6 +219,10 @@ function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 32);
 }
 
+function codexEventMessageId(role: string, text: string, occurredAt: string | undefined, sequence: number): string {
+  return `event_msg:${role}:${occurredAt || sequence}:${hashText(text)}`;
+}
+
 type ConversationCursorRecord = {
   file_path: string;
   file_size: number;
@@ -960,6 +964,9 @@ export async function captureLatestCodexConversation(
         continue;
       }
       if (payload.type === "user_message" || payload.type === "agent_message") {
+        if (!sawEventMessages) {
+          messages.length = 0;
+        }
         sawEventMessages = true;
         const role = payload.type === "user_message" ? "user" : "assistant";
         const text = typeof payload.message === "string" ? payload.message : "";
@@ -968,7 +975,7 @@ export async function captureLatestCodexConversation(
           role,
           text_len: text.length,
           text_hash: hashText(text),
-          message_id: String(payload.id || payload.message_id || entry.id || `${entry.type}:${messages.length}`),
+          message_id: String(payload.id || payload.message_id || entry.id || codexEventMessageId(role, text, occurredAt, sequence)),
           occurred_at: occurredAt,
           sequence
         };

@@ -156,3 +156,112 @@ test("Codex replay recovers latest turn context when cursor starts after the use
     else process.env.TINYAI_OBS_CURSOR_DIR = previousCursorDir;
   }
 });
+
+test("Codex replay excludes bootstrap context from real chat turn numbering", async () => {
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-bootstrap-`);
+  const sessionFile = `${dir}/rollout-2026-06-30T15-40-05-019f1778-9185-7540-8559-1c43fe78955e.jsonl`;
+  await writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: "bootstrap-session", cwd: "/tmp/project" } }),
+      JSON.stringify({
+        timestamp: "2026-06-30T07:40:06.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "# AGENTS.md instructions\n\n<INSTRUCTIONS>internal setup</INSTRUCTIONS>" },
+            { type: "input_text", text: "<environment_context><cwd>/tmp/project</cwd></environment_context>" }
+          ]
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T07:41:00.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "push吧\n" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T07:41:03.000Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch\n"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T07:41:10.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "已处理 push。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T07:41:12.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", duration_ms: 12000 }
+      })
+    ].join("\n") + "\n",
+    "utf8"
+  );
+
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    latestTurnOnly: true,
+    sessionFile
+  });
+
+  assert.deepEqual(snapshot.messages.map((message) => [message.turn_index, message.role, message.text]), [
+    [1, "user", "push吧\n"],
+    [1, "assistant", "已处理 push。"]
+  ]);
+  assert.equal(snapshot.request_usage?.[0]?.turn_index, 1);
+  assert.equal(snapshot.code_edits?.[0]?.turn_index, 1);
+});
+
+test("Codex replay gives separate real turns distinct message ids", async () => {
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-message-ids-`);
+  async function captureTurn(sessionFile, userText, assistantText, timestamp) {
+    await writeFile(
+      sessionFile,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "message-id-session", cwd: "/tmp/project" } }),
+        JSON.stringify({
+          timestamp: "2026-06-30T07:40:06.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "# AGENTS.md instructions\n\ninternal setup" }]
+          }
+        }),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: { type: "user_message", message: userText }
+        }),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: { type: "agent_message", message: assistantText }
+        }),
+        JSON.stringify({
+          timestamp,
+          type: "event_msg",
+          payload: { type: "task_complete", duration_ms: 1000 }
+        })
+      ].join("\n") + "\n",
+      "utf8"
+    );
+    return captureLatestCodexConversation({
+      includeText: true,
+      latestTurnOnly: true,
+      sessionFile
+    });
+  }
+
+  const first = await captureTurn(`${dir}/first.jsonl`, "第一问\n", "第一答", "2026-06-30T07:41:00.000Z");
+  const second = await captureTurn(`${dir}/second.jsonl`, "第二问\n", "第二答", "2026-06-30T07:42:00.000Z");
+
+  assert.notEqual(first.messages[0].message_id, second.messages[0].message_id);
+  assert.notEqual(first.messages[1].message_id, second.messages[1].message_id);
+});
