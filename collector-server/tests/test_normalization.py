@@ -306,6 +306,39 @@ class NormalizationTests(unittest.TestCase):
         self.assertNotIn("ide_opened_file", normalized["messages"][0]["content"])
         self.assertFalse(any("I need to understand the system architecture" in message["content"] for message in normalized["messages"]))
 
+    def test_claude_subagent_snapshot_is_not_a_top_level_turn(self):
+        payload = {
+            "session_id": "claude-session",
+            "request_id": "subagent-request",
+            "response_id": "subagent-response",
+            "title": "Read /repo/plugin-runtime/src/mcp-server.ts and return a structured summary",
+            "turn": {
+                "turn_index": 1,
+                "request_id": "subagent-request",
+                "response_id": "subagent-response",
+                "status": "failed",
+            },
+            "source_files": {
+                "claude_project_jsonl": {
+                    "path": "~/.claude/projects/project/session/subagents/agent-123.jsonl"
+                }
+            },
+            "messages": [
+                {"role": "user", "text": "Read /repo/plugin-runtime/src/mcp-server.ts and return a structured summary"},
+                {"role": "assistant", "text": "API Error: 400"},
+            ],
+            "process_steps": [{"step_type": "error", "text": "API Error: 400"}],
+            "request_usage": [{"request_id": "subagent-request", "response_id": "subagent-response", "request_index": 0}],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(normalized["turns"], [])
+        self.assertEqual(normalized["messages"], [])
+        self.assertEqual(normalized["process_steps"], [])
+        self.assertEqual(normalized["request_usage"], [])
+        self.assertIn("claude subagent snapshot skipped", normalized["warnings"][0])
+
     def test_turn_snapshot_derives_code_changes_from_apply_patch_tool_call(self):
         patch = """*** Begin Patch
 *** Update File: /Users/user/code/ai-observability/collector-server/tests/hello.py

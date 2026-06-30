@@ -2753,7 +2753,7 @@ async function migrateLegacyCollectorUrl() {
     await settings.update("collectorUrl", DEFAULT_COLLECTOR_URL, vscode.ConfigurationTarget.Global);
   }
 }
-var PLUGIN_VERSION = "0.1.40";
+var PLUGIN_VERSION = "0.1.41";
 function pluginNameForTool(tool) {
   if (tool === "claude") return "tinyai-observability-claude";
   if (tool === "codex") return "tinyai-observability-codex";
@@ -4093,7 +4093,7 @@ async function claudeJsonlFiles(options = {}) {
     join5(homedir3(), ".claude", "projects"),
     join5(homedir3(), ".claude", "transcripts")
   ];
-  const files = (await Promise.all(roots.map((root) => listJsonlFilesRecursive(root, "claude-project-jsonl", 4)))).flat().filter((file) => file.mtimeMs >= newestAllowedMtime).sort((left, right) => right.mtimeMs - left.mtimeMs);
+  const files = (await Promise.all(roots.map((root) => listJsonlFilesRecursive(root, "claude-project-jsonl", 4)))).flat().filter((file) => !file.path.replace(/\\/g, "/").toLowerCase().includes("/subagents/")).filter((file) => file.mtimeMs >= newestAllowedMtime).sort((left, right) => right.mtimeMs - left.mtimeMs);
   return files;
 }
 async function captureClaudeLocalTranscripts(options = {}) {

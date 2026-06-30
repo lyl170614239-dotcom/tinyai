@@ -241,7 +241,7 @@ async function migrateLegacyCollectorUrl() {
   }
 }
 
-const PLUGIN_VERSION = "0.1.40";
+const PLUGIN_VERSION = "0.1.41";
 
 function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
   if (tool === "claude") return "tinyai-observability-claude";
@@ -2357,6 +2357,7 @@ async function claudeJsonlFiles(options: { includeHistory?: boolean } = {}) {
   ];
   const files = (await Promise.all(roots.map((root) => listJsonlFilesRecursive(root, "claude-project-jsonl", 4))))
     .flat()
+    .filter((file) => !file.path.replace(/\\/g, "/").toLowerCase().includes("/subagents/"))
     .filter((file) => file.mtimeMs >= newestAllowedMtime)
     .sort((left, right) => right.mtimeMs - left.mtimeMs);
   return files;

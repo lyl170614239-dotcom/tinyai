@@ -779,6 +779,97 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(len(detail["turns"][0]["user_messages"]), 1)
         self.assertEqual(len(detail["turns"][0]["assistant_messages"]), 1)
 
+    def test_claude_subagent_snapshot_does_not_replace_top_level_turn(self):
+        top_event = EventIn(
+            event_id="claude-top-turn",
+            task_id="claude-subagent-session",
+            session_id="claude-subagent-session",
+            tool="claude",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 6, 30, 5, 49, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "claude-subagent-session",
+                "request_id": "request-user",
+                "response_id": "response-user",
+                "title": "继续看看系统架构",
+                "turn": {
+                    "turn_index": 3,
+                    "request_id": "request-user",
+                    "response_id": "response-user",
+                    "status": "completed",
+                    "started_at": "2026-06-30T05:49:26Z",
+                    "completed_at": "2026-06-30T05:50:26Z",
+                },
+                "messages": [
+                    {"role": "user", "text": "继续看看系统架构", "source_key": "request-user", "turn_index": 3},
+                    {"role": "assistant", "text": "系统架构深入分析如下", "source_key": "response-user", "turn_index": 3},
+                ],
+            },
+        )
+        subagent_event = EventIn(
+            event_id="claude-subagent-turn",
+            task_id="claude-subagent-session",
+            session_id="claude-subagent-session",
+            tool="claude",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 6, 30, 5, 49, 36, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "claude-subagent-session",
+                "request_id": "request-subagent",
+                "response_id": "response-subagent",
+                "title": "Read /repo/plugin-runtime/src/mcp-server.ts and return a structured summary",
+                "source_files": {
+                    "claude_project_jsonl": {
+                        "path": "~/.claude/projects/project/session/subagents/agent-123.jsonl"
+                    }
+                },
+                "turn": {
+                    "turn_index": 1,
+                    "request_id": "request-subagent",
+                    "response_id": "response-subagent",
+                    "status": "failed",
+                    "started_at": "2026-06-30T05:49:36Z",
+                    "completed_at": "2026-06-30T05:49:36Z",
+                },
+                "messages": [
+                    {"role": "user", "text": "Read /repo/plugin-runtime/src/mcp-server.ts and return a structured summary"},
+                    {"role": "assistant", "text": "API Error: 400"},
+                ],
+                "process_steps": [{"step_type": "error", "text": "API Error: 400"}],
+                "request_usage": [{"request_id": "request-subagent", "response_id": "response-subagent", "request_index": 0}],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-claude",
+            plugin_name="tinyai-observability-vscode",
+            plugin_version="0.1.41",
+            username="lyl",
+            user_id="user-1",
+            events=[top_event, subagent_event],
+        )
+
+        result = ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        detail = get_session_detail("claude-subagent-session", db=self.db)
+
+        self.assertEqual(result["accepted"], 2)
+        self.assertEqual(stats["succeeded"], 2)
+        self.assertEqual(len(self.db.execute(select(RawIngestEvent)).scalars().all()), 2)
+        self.assertEqual(len(self.db.execute(select(NormalizedIngestEvent)).scalars().all()), 2)
+        self.assertEqual(len(self.db.execute(select(AiTurn)).scalars().all()), 1)
+        self.assertEqual(
+            [(message.role, message.content) for message in self.db.execute(select(AiMessage).order_by(AiMessage.message_index)).scalars().all()],
+            [("user", "继续看看系统架构"), ("assistant", "系统架构深入分析如下")],
+        )
+        self.assertEqual([turn["request_id"] for turn in detail["turns"]], ["request-user"])
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["content"], "继续看看系统架构")
+
     def test_session_detail_does_not_mix_same_index_different_request_evidence(self):
         occurred = datetime(2026, 6, 30, 3, 42, tzinfo=timezone.utc)
         self.db.add(

@@ -133,6 +133,17 @@ def _looks_like_claude_agent_prompt(text: str, payload: dict[str, Any]) -> bool:
     return False
 
 
+def _is_claude_subagent_snapshot(payload: dict[str, Any]) -> bool:
+    source_files = payload.get("source_files")
+    if not isinstance(source_files, dict):
+        return False
+    claude_jsonl = source_files.get("claude_project_jsonl")
+    if not isinstance(claude_jsonl, dict):
+        return False
+    path = str(claude_jsonl.get("path") or "").replace("\\", "/").lower()
+    return "/subagents/" in path or path.startswith("subagents/")
+
+
 def _normalize_step_type(value: Any) -> str:
     text = str(value or "").lower()
     if text in {"visible_reasoning", "reasoning", "thinking"}:
@@ -1172,6 +1183,34 @@ def _normalize_turn_snapshot(event: EventIn, payload: dict[str, Any]) -> dict[st
     turn_status = str(turn.get("status") or payload.get("status") or "completed").lower()
     if turn_status not in {"active", "idle", "completed", "failed", "incomplete"}:
         turn_status = "completed"
+    if event.tool == "claude" and _is_claude_subagent_snapshot(payload):
+        return {
+            "schema_version": NORMALIZED_SCHEMA_VERSION,
+            "tool": event.tool,
+            "adapter": f"{event.tool}_turn_snapshot_v1",
+            "event_type": event.event_type,
+            "source_confidence": event.source_confidence,
+            "session": {
+                "session_id": session_id,
+                "external_session_id": payload.get("session_id") or event.session_id,
+                "task_id": event.task_id,
+                "user_id": event.user_id,
+                "started_at": started_at,
+                "last_activity_at": completed_at,
+                "status": "completed" if turn_status == "completed" else turn_status,
+                "title": None,
+                "model": payload.get("resolved_model") or payload.get("model") or event.model,
+            },
+            "turns": [],
+            "messages": [],
+            "process_steps": [],
+            "code_changes": [],
+            "spec_accesses": [],
+            "spec_documents": _normalize_spec_documents(payload),
+            "request_usage": [],
+            "usage_totals": {},
+            "warnings": ["claude subagent snapshot skipped from top-level product timeline"],
+        }
     messages = _normalize_messages(event, payload)
     usage = _normalize_request_usage(event, payload)
     usage_by_turn = {
