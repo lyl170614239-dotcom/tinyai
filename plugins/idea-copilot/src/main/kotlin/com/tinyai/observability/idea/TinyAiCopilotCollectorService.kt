@@ -26,14 +26,14 @@ class TinyAiCopilotCollectorService(private val project: Project) : Disposable {
             runCatching {
                 client.sendHeartbeat(project.name)
                 captureNow()
-            }.onFailure { log.warn("TinyAI initial IDEA capture failed", it) }
+            }.onFailure { log.warn("TinyAI initial JetBrains capture failed", it) }
         }
 
         val intervalSeconds = settings.state.scanIntervalSeconds.coerceAtLeast(10).toLong()
         scheduledFuture = AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(
             {
                 runCatching { captureNow() }
-                    .onFailure { log.warn("TinyAI scheduled IDEA capture failed", it) }
+                    .onFailure { log.warn("TinyAI scheduled JetBrains capture failed", it) }
             },
             intervalSeconds,
             intervalSeconds,

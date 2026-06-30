@@ -21,4 +21,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "tinyai-observability-idea"
+rootProject.name = "tinyai-observability-jetbrains"

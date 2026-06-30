@@ -24,8 +24,8 @@ class TinyAiCollectorClient(private val settings: TinyAiSettings) {
         val identity = settings.identity()
         val batch = TinyAiEventBatch(
             clientId = sha256Short("idea-copilot:${identity.userId}:${identity.machineId}"),
-            pluginName = TINYAI_IDEA_PLUGIN_NAME,
-            pluginVersion = TINYAI_IDEA_PLUGIN_VERSION,
+            pluginName = TINYAI_JETBRAINS_PLUGIN_NAME,
+            pluginVersion = TINYAI_JETBRAINS_PLUGIN_VERSION,
             username = identity.username,
             userId = identity.userId,
             userEmail = identity.userEmail,

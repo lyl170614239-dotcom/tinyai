@@ -28,7 +28,7 @@
             id="TinyAiObservability.SendHeartbeat"
             class="com.tinyai.observability.idea.SendHeartbeatAction"
             text="TinyAI Observability: Send Heartbeat"
-            description="Send a TinyAI IDEA plugin heartbeat">
+            description="Send a TinyAI JetBrains plugin heartbeat">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
     </actions>
