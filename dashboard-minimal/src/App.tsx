@@ -953,6 +953,7 @@ function isAiEvidenceCodeChange(change: AiCodeChange) {
     || kind.startsWith("claude_turn_")
     || kind.startsWith("codex_turn_")
     || kind.startsWith("codex_tool_")
+    || kind === "codex_mcp_auto_capture"
     || kind.includes("editor_delta")
     || kind.includes("workspace_diff")
     || kind.includes("tool_patch")

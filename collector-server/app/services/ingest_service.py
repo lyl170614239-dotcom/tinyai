@@ -51,6 +51,7 @@ MUTABLE_CODE_SNAPSHOT_KINDS = {
     "codex_turn_editor_delta",
     "codex_turn_tool_patch",
     "codex_turn_workspace_diff",
+    "codex_mcp_auto_capture",
     "workspace_diff_current",
     "workspace_diff",
     "vscode_text_change",
@@ -69,6 +70,7 @@ AI_TURN_CODE_SNAPSHOT_KINDS = {
     "codex_turn_tool_patch",
     "codex_turn_editor_delta",
     "codex_turn_workspace_diff",
+    "codex_mcp_auto_capture",
 }
 AI_TURN_TOOL_PATCH_SNAPSHOT_KINDS = {
     "copilot_turn_tool_patch",
@@ -2835,6 +2837,51 @@ def _candidate_line_changes_for_job(db: Session, code_change: AiCodeChange) -> t
     return event, candidates or [code_change.diff_json or {}]
 
 
+def _persist_attributed_commit_change(db: Session, code_change: AiCodeChange) -> None:
+    event, changes = _candidate_line_changes_for_job(db, code_change)
+    if event.event_type != "commit_snapshot":
+        return
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        occurred = _parse_time(change.get("occurred_at"), code_change.occurred_at)
+        attributed = _apply_commit_ai_attribution(db, event, occurred, dict(change))
+        updates = attributed.get("_line_ledger_updates")
+        if isinstance(updates, list):
+            _apply_commit_line_ledger_updates(db, event, occurred, _line_scope_from_event(event, event.payload if isinstance(event.payload, dict) else {}), updates)
+        summarized = _summarize_large_code_change(attributed)
+        code_change.file_path = _normalize_code_path(summarized.get("file_path")) or code_change.file_path
+        code_change.lines_added = int(summarized.get("lines_added") or code_change.lines_added or 0)
+        code_change.lines_deleted = int(summarized.get("lines_deleted") or code_change.lines_deleted or 0)
+        code_change.diff_hash = str(summarized.get("diff_hash") or "")[:128] or code_change.diff_hash
+        code_change.diff_json = {key: value for key, value in summarized.items() if key not in {"raw_json", "raw_path", "_line_ledger_updates"}}
+
+
+def _reattribute_recent_commit_snapshots_for_ai_change(db: Session, event: EventIn, occurred: datetime, change: dict[str, Any]) -> None:
+    snapshot_kind = str(change.get("snapshot_kind") or change.get("change_type") or event.event_type or "").lower()
+    if snapshot_kind not in AI_TURN_CODE_SNAPSHOT_KINDS:
+        return
+    file_path = _normalize_code_path(change.get("file_path") or change.get("path"))
+    scope = _line_scope_from_event(event, event.payload if isinstance(event.payload, dict) else {})
+    query = (
+        select(AiCodeChange, RawIngestEvent)
+        .join(RawIngestEvent, RawIngestEvent.event_id == AiCodeChange.event_id)
+        .where(AiCodeChange.change_type == "commit_snapshot")
+        .where(AiCodeChange.occurred_at >= occurred)
+        .where(AiCodeChange.occurred_at <= occurred + timedelta(hours=24))
+        .order_by(AiCodeChange.occurred_at.asc(), AiCodeChange.id.asc())
+        .limit(200)
+    )
+    for commit_change, raw in db.execute(query).all():
+        if file_path:
+            commit_file_path = _normalize_code_path(commit_change.file_path or _code_change_payload(commit_change).get("file_path"))
+            if commit_file_path and commit_file_path != file_path:
+                continue
+        if not _scope_matches(scope, _line_scope_from_raw(raw)):
+            continue
+        _persist_attributed_commit_change(db, commit_change)
+
+
 def _process_line_attribution_job(db: Session, job: LineAttributionJob) -> None:
     code_change = db.get(AiCodeChange, job.code_change_id)
     if code_change is None:
@@ -2842,17 +2889,15 @@ def _process_line_attribution_job(db: Session, job: LineAttributionJob) -> None:
     if code_change.is_effective is False:
         return
     event, changes = _candidate_line_changes_for_job(db, code_change)
+    if event.event_type == "commit_snapshot":
+        _persist_attributed_commit_change(db, code_change)
+        return
     for change in changes:
         if not isinstance(change, dict):
             continue
         occurred = _parse_time(change.get("occurred_at"), code_change.occurred_at)
-        if event.event_type == "commit_snapshot":
-            attributed = _apply_commit_ai_attribution(db, event, occurred, dict(change))
-            updates = attributed.get("_line_ledger_updates")
-            if isinstance(updates, list):
-                _apply_commit_line_ledger_updates(db, event, occurred, _line_scope_from_event(event, event.payload if isinstance(event.payload, dict) else {}), updates)
-        else:
-            _update_line_ledger_from_ai_change(db, event, occurred, change)
+        _update_line_ledger_from_ai_change(db, event, occurred, change)
+        _reattribute_recent_commit_snapshots_for_ai_change(db, event, occurred, change)
 
 
 def process_pending_line_attribution_jobs(db: Session, limit: int | None = None, worker_id: str = "collector-worker") -> dict[str, int]:

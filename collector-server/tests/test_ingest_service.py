@@ -3018,6 +3018,127 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(stats["succeeded"], 1)
         self.assertEqual([(row.line_no, row.text_preview) for row in ledger_rows], [(1, "alpha = 1"), (3, "beta = 2")])
 
+    def test_codex_mcp_auto_capture_updates_line_ledger_and_commit_attribution(self):
+        file_path = "dashboard-minimal/src/App.tsx"
+        workspace_hash = "workspace-codex-auto-capture"
+
+        def line_hash(text: str) -> str:
+            return hashlib.sha256(f"{file_path}\0{text}".encode("utf-8")).hexdigest()
+
+        codex_change = EventIn(
+            event_id="codex-auto-capture-turn",
+            task_id="codex-task",
+            session_id="codex-session",
+            tool="codex",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 5, tzinfo=timezone.utc),
+            source_confidence="direct",
+            username="user",
+            user_id="zhangsan@example.com",
+            host_hash="host-1",
+            workspace_path_hash=workspace_hash,
+            payload={
+                "session_id": "codex-session",
+                "request_id": "codex-request",
+                "response_id": "codex-response",
+                "turn_index": 1,
+                "snapshot_kind": "codex_mcp_auto_capture",
+                "code_changes": [
+                    {
+                        "snapshot_kind": "codex_mcp_auto_capture",
+                        "file_path": file_path,
+                        "request_id": "codex-request",
+                        "response_id": "codex-response",
+                        "occurred_at": "2026-06-24T10:00:00Z",
+                        "lines_added": 2,
+                        "lines_deleted": 1,
+                        "hunks": [
+                            {
+                                "old_start": 1,
+                                "old_lines": 1,
+                                "new_start": 1,
+                                "new_lines": 2,
+                                "lines": [
+                                    {"line_type": "removed", "old_line": 1, "text": "const oldSidebar = true;", "text_hash": line_hash("const oldSidebar = true;")},
+                                    {"line_type": "added", "new_line": 1, "text": "const newSidebar = false;", "text_hash": line_hash("const newSidebar = false;")},
+                                    {"line_type": "added", "new_line": 2, "text": "const addedByCodex = true;", "text_hash": line_hash("const addedByCodex = true;")},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        commit_snapshot = EventIn(
+            event_id="commit-codex-auto-capture",
+            task_id="commit-codex-auto-capture",
+            tool="copilot",
+            event_type="commit_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 3, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="user",
+            user_id="zhangsan@example.com",
+            host_hash="host-1",
+            workspace_path_hash=workspace_hash,
+            payload={
+                "commit_sha": "codexabc123",
+                "branch": "codex/test",
+                "snapshot_kind": "commit",
+                "files_changed": 1,
+                "lines_added": 3,
+                "lines_deleted": 1,
+                "file_paths": [file_path],
+                "files": [
+                    {
+                        "file_path": file_path,
+                        "lines_added": 3,
+                        "lines_deleted": 1,
+                        "hunks": [
+                            {
+                                "old_start": 1,
+                                "old_lines": 1,
+                                "new_start": 1,
+                                "new_lines": 3,
+                                "lines": [
+                                    {"line_type": "removed", "old_line": 1, "text": "const oldSidebar = true;", "text_hash": line_hash("const oldSidebar = true;")},
+                                    {"line_type": "added", "new_line": 1, "text": "const newSidebar = false;", "text_hash": line_hash("const newSidebar = false;")},
+                                    {"line_type": "added", "new_line": 2, "text": "const addedByCodex = true;", "text_hash": line_hash("const addedByCodex = true;")},
+                                    {"line_type": "added", "new_line": 3, "text": "const addedInCommit = true;", "text_hash": line_hash("const addedInCommit = true;")},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-1",
+            plugin_name="tinyai-observability-codex",
+            plugin_version="0.1.0",
+            username="user",
+            user_id="zhangsan@example.com",
+            host_hash="host-1",
+            events=[commit_snapshot, codex_change],
+        )
+
+        ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        ledger_rows = self.db.execute(
+            select(AiLineAttribution).where(AiLineAttribution.file_path == file_path).order_by(AiLineAttribution.line_no)
+        ).scalars().all()
+        commit_change = self.db.execute(
+            select(AiCodeChange).where(AiCodeChange.event_id == "commit-codex-auto-capture")
+        ).scalars().one()
+        diff_json = commit_change.diff_json
+
+        self.assertEqual(stats["succeeded"], 2)
+        self.assertEqual(diff_json["matched_ai_change_event_ids"], ["codex-auto-capture-turn"])
+        self.assertEqual(diff_json["ai_current_lines_added"], 2)
+        self.assertEqual(diff_json["ai_current_lines_deleted"], 1)
+        self.assertEqual(diff_json["human_current_lines_added"], 1)
+        self.assertEqual(diff_json["human_current_lines_deleted"], 0)
+        self.assertEqual([(row.line_no, row.text_preview, row.classification) for row in ledger_rows], [(1, "const newSidebar = false;", "ai_current"), (2, "const addedByCodex = true;", "ai_current"), (3, "const addedInCommit = true;", "human_current")])
+
     def test_line_attribution_ledger_is_processed_by_separate_async_job(self):
         file_path = "collector-server/tests/async_ledger.py"
 
