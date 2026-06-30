@@ -152,6 +152,7 @@ export interface ConversationSnapshot {
   model?: string;
   resolved_model?: string;
   latest_turn_complete?: boolean;
+  turn_index_offset?: number;
   capture_cursor?: CaptureCursorMetadata;
 }
 
@@ -231,6 +232,7 @@ type ConversationCursorRecord = {
   session_id?: string;
   cwd?: string;
   source?: string;
+  user_message_count?: number;
 };
 
 type ConversationCursorStore = Record<string, ConversationCursorRecord>;
@@ -294,6 +296,27 @@ function jsonlPayloadType(line: string): string | undefined {
 
 function codexLinesContainPayloadType(lines: string[], type: string): boolean {
   return lines.some((line) => jsonlPayloadType(line) === type);
+}
+
+function countCodexRealUserMessages(lines: string[]): number {
+  let count = 0;
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      const payload = entry?.payload;
+      if (
+        entry?.type === "event_msg" &&
+        payload?.type === "user_message" &&
+        typeof payload.message === "string" &&
+        payload.message.trim()
+      ) {
+        count += 1;
+      }
+    } catch {
+      // Ignore partial or malformed historical lines.
+    }
+  }
+  return count;
 }
 
 async function readCompleteJsonlLines(filePath: string, offset: number, fileSize: number): Promise<{ lines: string[]; nextOffset: number }> {
@@ -374,12 +397,51 @@ async function readIncrementalJsonlLines(
   };
 }
 
+async function codexTurnIndexOffset(
+  filePath: string,
+  cursor: CaptureCursorMetadata,
+  state?: ConversationCursorRecord
+): Promise<number> {
+  if (cursor.previous_offset <= 0) return 0;
+  if (
+    state?.read_offset === cursor.previous_offset &&
+    typeof state.user_message_count === "number" &&
+    Number.isFinite(state.user_message_count) &&
+    state.user_message_count >= 0
+  ) {
+    return state.user_message_count;
+  }
+  const prefix = await readCompleteJsonlLines(filePath, 0, cursor.previous_offset);
+  return countCodexRealUserMessages(prefix.lines);
+}
+
+function snapshotMaxTurnIndex(snapshot: ConversationSnapshot): number | undefined {
+  const candidates = [
+    ...(snapshot.messages || []),
+    ...(snapshot.process_steps || []),
+    ...(snapshot.code_edits || []),
+    ...(snapshot.request_usage || [])
+  ].flatMap((item) => {
+    const value = item.turn_index;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? [value] : [];
+  });
+  return candidates.length > 0 ? Math.max(...candidates) : undefined;
+}
+
 export async function commitConversationCursor(snapshot: ConversationSnapshot): Promise<boolean> {
   const cursor = snapshot.capture_cursor;
   if (!cursor) return false;
   const store = await loadCursorStore(cursor.tool);
   const existing = store[cursor.key];
   if (existing && existing.read_offset > cursor.next_offset) return false;
+  const previousUserMessageCount =
+    existing?.read_offset === cursor.previous_offset &&
+    typeof existing.user_message_count === "number" &&
+    Number.isFinite(existing.user_message_count)
+      ? existing.user_message_count
+      : snapshot.turn_index_offset || 0;
+  const observedUserMessageCount =
+    snapshotMaxTurnIndex(snapshot) || previousUserMessageCount + snapshot.user_message_count;
   store[cursor.key] = {
     file_path: cursor.file_path,
     file_size: cursor.file_size,
@@ -387,7 +449,8 @@ export async function commitConversationCursor(snapshot: ConversationSnapshot): 
     updated_at: new Date().toISOString(),
     session_id: canonicalSessionIdForFile(snapshot.session_id || existing?.session_id, cursor.file_path),
     cwd: snapshot.cwd || existing?.cwd,
-    source: snapshot.source || existing?.source
+    source: snapshot.source || existing?.source,
+    user_message_count: Math.max(previousUserMessageCount, observedUserMessageCount)
   };
   await saveCursorStore(cursor.tool, store);
   return true;
@@ -665,12 +728,13 @@ function buildCodexRequestUsage(input: {
   turnEvents: CapturedTurnEvent[];
   tokenUsageEvents: CapturedTokenUsageEvent[];
   modelEvents: CapturedModelEvent[];
+  turnIndexOffset?: number;
 }): { requestUsage: CapturedRequestUsage[]; usageTotals: CapturedUsageTotals; resolvedModel?: string } {
   const userMessages = input.messages.filter((message) => message.role === "user");
   const requestUsage: CapturedRequestUsage[] = [];
 
   userMessages.forEach((userMessage, index) => {
-    const turnIndex = index + 1;
+    const turnIndex = (input.turnIndexOffset || 0) + index + 1;
     const startSequence = typeof userMessage.sequence === "number" ? userMessage.sequence : 0;
     const nextUserSequence = userMessages[index + 1]?.sequence;
     const beforeNextTurn = (sequence: number) => nextUserSequence === undefined || sequence < nextUserSequence;
@@ -737,7 +801,8 @@ export function latestCodexTurnSnapshot(snapshot: ConversationSnapshot): Convers
   }
   if (lastUserIndex < 0) return { ...snapshot, latest_turn_complete: false };
 
-  const turnIndex = messages.slice(0, lastUserIndex + 1).filter((message) => message.role === "user").length;
+  const localTurnIndex = messages.slice(0, lastUserIndex + 1).filter((message) => message.role === "user").length;
+  const turnIndex = (snapshot.turn_index_offset || 0) + localTurnIndex;
   const userMessage = messages[lastUserIndex];
   const boundarySequence = typeof userMessage.sequence === "number" ? userMessage.sequence : undefined;
   const { requestId, responseId } = codexTurnIds(snapshot.session_id, turnIndex, userMessage);
@@ -859,6 +924,7 @@ export async function captureLatestCodexConversation(
     bootstrapAtEof: !options.sessionFile
   });
   let lines = incrementalLines;
+  let usingIncrementalTail = true;
   if (
     options.latestTurnOnly &&
     incrementalLines.length > 0 &&
@@ -866,8 +932,15 @@ export async function captureLatestCodexConversation(
     !codexLinesContainPayloadType(incrementalLines, "user_message")
   ) {
     const full = await readCompleteJsonlLines(file, 0, cursor.file_size);
-    if (full.lines.length > incrementalLines.length) lines = full.lines;
+    if (full.lines.length > incrementalLines.length) {
+      lines = full.lines;
+      usingIncrementalTail = false;
+    }
   }
+  const turnIndexOffset =
+    usingIncrementalTail && codexLinesContainPayloadType(lines, "user_message")
+      ? await codexTurnIndexOffset(file, cursor, state)
+      : 0;
   if (lines.length === 0) {
     return emptyConversationSnapshot({
       tool: "codex",
@@ -1071,7 +1144,8 @@ export async function captureLatestCodexConversation(
     messages,
     turnEvents,
     tokenUsageEvents,
-    modelEvents
+    modelEvents,
+    turnIndexOffset
   });
 
   const snapshot = {
@@ -1102,6 +1176,7 @@ export async function captureLatestCodexConversation(
     request_usage: requestUsage.length > 0 ? requestUsage : undefined,
     usage_totals: requestUsage.length > 0 ? usageTotals : undefined,
     latest_turn_complete: codexLatestTurnComplete(messages, turnEvents),
+    turn_index_offset: turnIndexOffset,
     capture_cursor: cursor
   };
   return options.latestTurnOnly ? latestCodexTurnSnapshot(snapshot) : snapshot;

@@ -157,6 +157,121 @@ test("Codex replay recovers latest turn context when cursor starts after the use
   }
 });
 
+test("Codex incremental replay preserves absolute turn index after prior completed turns", async () => {
+  const previousCursorDir = process.env.TINYAI_OBS_CURSOR_DIR;
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-turn-index-`);
+  process.env.TINYAI_OBS_CURSOR_DIR = dir;
+  try {
+    const sessionFile = `${dir}/rollout-2026-06-30T17-17-43-019f17d1-f412-7ba3-9b70-175d46f13b55.jsonl`;
+    const lines = [
+      { type: "session_meta", payload: { id: "codex-three-turn-session", cwd: "/tmp/project" } },
+      {
+        timestamp: "2026-06-30T09:17:44.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-1" }
+      },
+      {
+        timestamp: "2026-06-30T09:17:45.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "你好\n" }
+      },
+      {
+        timestamp: "2026-06-30T09:17:46.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "你好！" }
+      },
+      {
+        timestamp: "2026-06-30T09:17:47.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-1", duration_ms: 1000 }
+      },
+      {
+        timestamp: "2026-06-30T09:18:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-2" }
+      },
+      {
+        timestamp: "2026-06-30T09:18:01.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "你在说什么\n" }
+      },
+      {
+        timestamp: "2026-06-30T09:18:02.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "我在回答你的问题。" }
+      },
+      {
+        timestamp: "2026-06-30T09:18:03.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-2", duration_ms: 2000 }
+      }
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+    const suffix = [
+      {
+        timestamp: "2026-06-30T09:19:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-3" }
+      },
+      {
+        timestamp: "2026-06-30T09:19:01.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "给我在当前目录下面增加一个md文档和一个py脚本\n" }
+      },
+      {
+        timestamp: "2026-06-30T09:19:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { input_tokens: 30, output_tokens: 12 } }
+        }
+      },
+      {
+        timestamp: "2026-06-30T09:19:03.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "已经创建文档和脚本。" }
+      },
+      {
+        timestamp: "2026-06-30T09:19:04.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-3", duration_ms: 3000 }
+      }
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+    await writeFile(sessionFile, lines + suffix, "utf8");
+    const cursorOffset = Buffer.byteLength(lines, "utf8");
+    const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 32);
+    await writeFile(
+      `${dir}/codex-conversation-cursors.json`,
+      JSON.stringify({
+        [key]: {
+          file_path: sessionFile,
+          file_size: cursorOffset,
+          read_offset: cursorOffset,
+          updated_at: "2026-06-30T09:18:04.000Z",
+          session_id: "codex-three-turn-session"
+        }
+      }),
+      "utf8"
+    );
+
+    const snapshot = await captureLatestCodexConversation({
+      includeText: true,
+      latestTurnOnly: true,
+      sessionFile
+    });
+
+    assert.deepEqual(snapshot.messages.map((message) => [message.turn_index, message.role, message.text]), [
+      [3, "user", "给我在当前目录下面增加一个md文档和一个py脚本\n"],
+      [3, "assistant", "已经创建文档和脚本。"]
+    ]);
+    assert.equal(snapshot.request_usage?.[0]?.turn_index, 3);
+    assert.equal(snapshot.turn_events?.[0]?.turn_id, "turn-3");
+    assert.equal(snapshot.latest_turn_complete, true);
+  } finally {
+    if (previousCursorDir === undefined) delete process.env.TINYAI_OBS_CURSOR_DIR;
+    else process.env.TINYAI_OBS_CURSOR_DIR = previousCursorDir;
+  }
+});
+
 test("Codex replay excludes bootstrap context from real chat turn numbering", async () => {
   const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-bootstrap-`);
   const sessionFile = `${dir}/rollout-2026-06-30T15-40-05-019f1778-9185-7540-8559-1c43fe78955e.jsonl`;

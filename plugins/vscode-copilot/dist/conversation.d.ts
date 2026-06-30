@@ -124,6 +124,7 @@ export interface ConversationSnapshot {
     model?: string;
     resolved_model?: string;
     latest_turn_complete?: boolean;
+    turn_index_offset?: number;
     capture_cursor?: CaptureCursorMetadata;
 }
 export declare function commitConversationCursor(snapshot: ConversationSnapshot): Promise<boolean>;
