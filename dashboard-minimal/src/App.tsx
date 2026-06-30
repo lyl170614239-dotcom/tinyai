@@ -980,7 +980,7 @@ function attributionLabel(value: unknown) {
   if (text === "ai_evidence_removed") return "AI 删除";
   if (text === "ai_assisted_human_edited") return "AI 辅助后人工改写";
   if (text === "human_removed_ai_origin") return "人工删除 AI 来源";
-  if (text === "human_current") return "人工当前";
+  if (text === "human_current") return "人工当前（未命中 AI 证据）";
   return "";
 }
 
@@ -1293,7 +1293,7 @@ function CommitAttributionDiffView({ change }: { change: AiCodeChange }) {
         {" "}AI 当前新增 +{fmtNumber(counts.aiAdded)}
         {counts.aiDeleted ? ` · 删除 AI 来源 -${fmtNumber(counts.aiDeleted)}` : ""}
         {counts.aiModified ? ` · AI 来源修改 ${fmtNumber(counts.aiModified)}` : ""}
-        {" · "}人工当前 +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}
+        {" · "}人工当前（未命中 AI 证据） +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}
         {counts.aiAssistedHumanEditedModified ? ` · AI 辅助后人工改写 改${fmtNumber(counts.aiAssistedHumanEditedModified)}` : ""}
         {!counts.aiAssistedHumanEditedModified && counts.aiAssistedHumanEditedAdded ? ` · AI 辅助后人工改写 +${fmtNumber(counts.aiAssistedHumanEditedAdded)}` : ""}
         {counts.standaloneAiOriginDeletedByHuman ? ` · 人工删除 AI 来源 -${fmtNumber(counts.standaloneAiOriginDeletedByHuman)}` : ""}
@@ -1305,7 +1305,7 @@ function CommitAttributionDiffView({ change }: { change: AiCodeChange }) {
           这个提交超过 {fmtNumber(attributionLimit)} 行阈值，行级证据已摘要化。完整提交 diff 可通过 blob 详情接口按需读取。
         </div>
       ) : (
-        <div className="diff-empty">这个提交没有匹配到 AI 行证据，当前按人工当前贡献 / 未命中处理。</div>
+        <div className="diff-empty">这个提交没有匹配到 AI 行证据，按人工当前计入；判定原因是未命中 AI 证据。</div>
       )}
     </div>
   );
@@ -1418,7 +1418,7 @@ function CodeChangeSummary({ change }: { change: AiCodeChange }) {
               {counts.aiDeleted ? ` · 删除AI来源 -${fmtNumber(counts.aiDeleted)}` : ""}
               {counts.aiModified ? ` · AI来源修改 ${fmtNumber(counts.aiModified)}` : ""}
               {" · "}
-              人工当前 +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}
+              人工当前（未命中 AI 证据） +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}
               {counts.aiAssistedHumanEditedModified ? ` · AI辅助后人工改写 改${fmtNumber(counts.aiAssistedHumanEditedModified)}` : ""}
               {!counts.aiAssistedHumanEditedModified && counts.aiAssistedHumanEditedAdded ? ` · AI辅助后人工改写 +${fmtNumber(counts.aiAssistedHumanEditedAdded)}` : ""}
               {counts.standaloneAiOriginDeletedByHuman ? ` · 人工删除AI来源 -${fmtNumber(counts.standaloneAiOriginDeletedByHuman)}` : ""}
@@ -1508,7 +1508,7 @@ function CommitAttributionCard({ group, defaultOpen = false }: { group: CommitGr
         </div>
         <div className="commit-summary-metrics">
           <span className="commit-pill ai">AI 当前 +{fmtNumber(group.aiCurrentAdded)} -{fmtNumber(group.aiCurrentDeleted)} 改{fmtNumber(group.aiCurrentModified)}</span>
-          <span className="commit-pill human">人工当前 +{fmtNumber(group.humanCurrentAdded)} -{fmtNumber(group.humanCurrentDeleted)} 改{fmtNumber(group.humanCurrentModified)}</span>
+          <span className="commit-pill human">人工当前（未命中 AI 证据） +{fmtNumber(group.humanCurrentAdded)} -{fmtNumber(group.humanCurrentDeleted)} 改{fmtNumber(group.humanCurrentModified)}</span>
           <span className="commit-pill assisted">AI 辅助后人工改写 {fmtNumber(assistedTotal)}</span>
           <span className="commit-pill">AI 占比 {aiRatio}</span>
           {group.matchedEvidenceCount > 0 && <span className="commit-pill">命中 {group.matchedEvidenceCount} 条 AI 证据</span>}
@@ -1529,7 +1529,7 @@ function CommitAttributionCard({ group, defaultOpen = false }: { group: CommitGr
                 <strong>{filePath}</strong>
                 <span>总量 +{fmtNumber(change.lines_added)} -{fmtNumber(change.lines_deleted)}</span>
                 <span>AI 当前 +{fmtNumber(counts.aiAdded)} -{fmtNumber(counts.aiDeleted)} 改{fmtNumber(counts.aiModified)}</span>
-                <span>人工当前 +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}</span>
+                <span>人工当前（未命中 AI 证据） +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}</span>
                 {(counts.aiAssistedHumanEditedAdded || counts.aiAssistedHumanEditedModified) ? (
                   <span>AI 辅助后人工改写 +{fmtNumber(counts.aiAssistedHumanEditedAdded)} 改{fmtNumber(counts.aiAssistedHumanEditedModified)}</span>
                 ) : <span>AI 辅助后人工改写 0</span>}
@@ -2116,7 +2116,7 @@ function CodeAttributionContent({
         <SummaryCard label="代码变更事件" value={summary?.code_snapshot_count ?? 0} />
         <SummaryCard label="Commit 数" value={fmtNumber(commitGroups.length)} hint={`${fmtNumber(commitTotals.files)} 个文件`} />
         <SummaryCard label="AI 当前贡献" value={`+${fmtNumber(commitTotals.aiCurrentAdded)} -${fmtNumber(commitTotals.aiCurrentDeleted)} 改${fmtNumber(commitTotals.aiCurrentModified)}`} tone="primary" />
-        <SummaryCard label="人工当前贡献" value={`+${fmtNumber(commitTotals.humanCurrentAdded)} -${fmtNumber(commitTotals.humanCurrentDeleted)} 改${fmtNumber(commitTotals.humanCurrentModified)}`} />
+        <SummaryCard label="人工当前（未命中 AI 证据）" value={`+${fmtNumber(commitTotals.humanCurrentAdded)} -${fmtNumber(commitTotals.humanCurrentDeleted)} 改${fmtNumber(commitTotals.humanCurrentModified)}`} />
         <SummaryCard label="AI 辅助后人工改写" value={fmtNumber(assistedContribution)} hint={`+${fmtNumber(commitTotals.aiAssistedHumanEditedAdded)} · 改${fmtNumber(commitTotals.aiAssistedHumanEditedModified)}`} tone="warning" />
         <SummaryCard label="人工删除 AI 来源" value={fmtNumber(commitTotals.aiOriginDeletedByHuman)} />
         <SummaryCard label="AI 代码占比" value={aiRatio} hint={`${fmtNumber(commitTotals.evidence)} 条 AI 证据命中`} tone="success" />

@@ -3139,6 +3139,124 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(diff_json["human_current_lines_deleted"], 0)
         self.assertEqual([(row.line_no, row.text_preview, row.classification) for row in ledger_rows], [(1, "const newSidebar = false;", "ai_current"), (2, "const addedByCodex = true;", "ai_current"), (3, "const addedInCommit = true;", "human_current")])
 
+    def test_commit_attribution_does_not_match_ai_evidence_from_different_user(self):
+        file_path = "dashboard-minimal/src/cross_user.ts"
+        workspace_hash = "workspace-cross-user"
+
+        def line_hash(text: str) -> str:
+            return hashlib.sha256(f"{file_path}\0{text}".encode("utf-8")).hexdigest()
+
+        ai_turn = EventIn(
+            event_id="cross-user-ai-turn",
+            task_id="codex-task-cross-user",
+            session_id="codex-session-cross-user",
+            tool="codex",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc),
+            source_confidence="direct",
+            username="zhangsan",
+            user_id="zhangsan@example.com",
+            host_hash="host-1",
+            workspace_path_hash=workspace_hash,
+            payload={
+                "session_id": "codex-session-cross-user",
+                "request_id": "codex-request-cross-user",
+                "response_id": "codex-response-cross-user",
+                "turn_index": 1,
+                "snapshot_kind": "codex_mcp_auto_capture",
+                "code_changes": [
+                    {
+                        "snapshot_kind": "codex_mcp_auto_capture",
+                        "file_path": file_path,
+                        "request_id": "codex-request-cross-user",
+                        "response_id": "codex-response-cross-user",
+                        "occurred_at": "2026-06-24T10:00:00Z",
+                        "lines_added": 1,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 1,
+                                "lines": [
+                                    {"line_type": "added", "new_line": 1, "text": "export const owner = 'zhangsan';", "text_hash": line_hash("export const owner = 'zhangsan';")},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        commit_snapshot = EventIn(
+            event_id="cross-user-commit",
+            task_id="commit-cross-user",
+            tool="copilot",
+            event_type="commit_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 5, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lisi",
+            user_id="lisi@example.com",
+            host_hash="host-1",
+            workspace_path_hash=workspace_hash,
+            payload={
+                "commit_sha": "crossuserabc123",
+                "branch": "main",
+                "snapshot_kind": "commit",
+                "files_changed": 1,
+                "lines_added": 1,
+                "lines_deleted": 0,
+                "file_paths": [file_path],
+                "files": [
+                    {
+                        "file_path": file_path,
+                        "lines_added": 1,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 1,
+                                "lines": [
+                                    {"line_type": "added", "new_line": 1, "text": "export const owner = 'zhangsan';", "text_hash": line_hash("export const owner = 'zhangsan';")},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-1",
+            plugin_name="tinyai-observability-codex",
+            plugin_version="0.1.0",
+            username="zhangsan",
+            user_id="zhangsan@example.com",
+            host_hash="host-1",
+            events=[ai_turn, commit_snapshot],
+        )
+
+        ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        commit_change = self.db.execute(
+            select(AiCodeChange).where(AiCodeChange.event_id == "cross-user-commit")
+        ).scalars().one()
+        ledger_rows = self.db.execute(
+            select(AiLineAttribution)
+            .where(AiLineAttribution.file_path == file_path)
+            .order_by(AiLineAttribution.user_id, AiLineAttribution.classification)
+        ).scalars().all()
+
+        self.assertEqual(stats["succeeded"], 2)
+        self.assertEqual(commit_change.diff_json["matched_ai_change_event_ids"], [])
+        self.assertEqual(commit_change.diff_json["ai_current_lines_added"], 0)
+        self.assertEqual(commit_change.diff_json["human_current_lines_added"], 1)
+        self.assertEqual(
+            [(row.user_id, row.classification) for row in ledger_rows],
+            [("lisi@example.com", "human_current"), ("zhangsan@example.com", "ai_current")],
+        )
+
     def test_line_attribution_ledger_is_processed_by_separate_async_job(self):
         file_path = "collector-server/tests/async_ledger.py"
 

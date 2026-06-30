@@ -1073,8 +1073,6 @@ def _line_scope_from_event(event: EventIn, payload: dict[str, Any] | None = None
             machine_id = ""
         if has_commit_placeholder_identity or host_hash.lower() in {"unknown"}:
             host_hash = ""
-        if has_commit_placeholder_identity:
-            client_id = ""
     return {
         "workspace_path_hash": str(event.workspace_path_hash or payload.get("workspace_path_hash") or "").strip(),
         "client_id": client_id,
@@ -1096,22 +1094,60 @@ def _line_scope_from_raw(raw: RawIngestEvent) -> dict[str, str]:
     }
 
 
+def _scope_user(scope: dict[str, str]) -> str:
+    return scope.get("user_id") or scope.get("username") or ""
+
+
+def _scope_same_host_or_machine(target: dict[str, str], candidate: dict[str, str]) -> bool:
+    target_host = target.get("host_hash")
+    candidate_host = candidate.get("host_hash")
+    if target_host or candidate_host:
+        return bool(target_host and candidate_host and target_host == candidate_host)
+    target_machine = target.get("machine_id")
+    candidate_machine = candidate.get("machine_id")
+    if target_machine or candidate_machine:
+        return bool(target_machine and candidate_machine and target_machine == candidate_machine)
+    return False
+
+
+def _scope_has_host_or_machine(scope: dict[str, str]) -> bool:
+    return bool(scope.get("host_hash") or scope.get("machine_id"))
+
+
+def _scope_host_or_machine_compatible(target: dict[str, str], candidate: dict[str, str]) -> bool:
+    target_host = target.get("host_hash")
+    candidate_host = candidate.get("host_hash")
+    if target_host and candidate_host:
+        return target_host == candidate_host
+    target_machine = target.get("machine_id")
+    candidate_machine = candidate.get("machine_id")
+    if target_machine and candidate_machine:
+        return target_machine == candidate_machine
+    return True
+
+
+def _scope_same_client(target: dict[str, str], candidate: dict[str, str]) -> bool:
+    return bool(target.get("client_id") and target["client_id"] == candidate.get("client_id"))
+
+
 def _scope_matches(target: dict[str, str], candidate: dict[str, str]) -> bool:
-    if target.get("workspace_path_hash") and candidate.get("workspace_path_hash") != target["workspace_path_hash"]:
-        return False
-    for field in ("machine_id", "host_hash"):
-        if target.get(field) and candidate.get(field) and target[field] != candidate[field]:
-            return False
-    target_user = target.get("user_id") or target.get("username")
-    candidate_user = candidate.get("user_id") or candidate.get("username")
+    target_user = _scope_user(target)
+    candidate_user = _scope_user(candidate)
     if target_user and candidate_user and target_user != candidate_user:
         return False
-    if not target.get("workspace_path_hash"):
-        same_client = target.get("client_id") and target["client_id"] == candidate.get("client_id")
-        same_user = target_user and target_user == candidate_user
-        if not (same_client or same_user):
+
+    target_workspace = target.get("workspace_path_hash")
+    candidate_workspace = candidate.get("workspace_path_hash")
+    if target_workspace or candidate_workspace:
+        if not target_workspace or not candidate_workspace or target_workspace != candidate_workspace:
             return False
-    return True
+        if not target_user or not candidate_user:
+            return _scope_same_client(target, candidate) and _scope_host_or_machine_compatible(target, candidate)
+        return _scope_same_host_or_machine(target, candidate) or _scope_same_client(target, candidate)
+
+    if not target_user or not candidate_user:
+        return False
+    return _scope_same_client(target, candidate) and _scope_host_or_machine_compatible(target, candidate)
 
 
 def _matching_ai_evidence_rows(db: Session, event: EventIn, occurred: datetime) -> list[AiCodeChange]:
@@ -1188,6 +1224,11 @@ def _line_text_preview(line: dict[str, Any]) -> str | None:
 
 
 def _line_attr_scope_filter(query, scope: dict[str, str]):
+    strong_scope = bool(
+        scope.get("workspace_path_hash")
+        and _scope_user(scope)
+        and (scope.get("host_hash") or scope.get("machine_id"))
+    )
     if scope.get("workspace_path_hash"):
         query = query.where(AiLineAttribution.workspace_path_hash == scope["workspace_path_hash"])
     if scope.get("machine_id"):
@@ -1198,7 +1239,7 @@ def _line_attr_scope_filter(query, scope: dict[str, str]):
         query = query.where(AiLineAttribution.user_id == scope["user_id"])
     elif scope.get("username"):
         query = query.where(AiLineAttribution.username == scope["username"])
-    if scope.get("client_id"):
+    if scope.get("client_id") and not strong_scope:
         query = query.where(AiLineAttribution.client_id == scope["client_id"])
     return query
 
