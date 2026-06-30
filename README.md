@@ -12,7 +12,8 @@ native plugin packages for Claude Code, Codex, and VS Code Copilot users.
 collector-server/     FastAPI collector backed by MySQL
 plugin-runtime/       Shared TypeScript runtime, uploader, MCP server, redactor
 plugins/claude-code/  Claude Code plugin package
-plugins/codex/        Codex plugin package
+plugins/codex/        Codex marketplace root
+plugins/codex/plugins/observability/ Codex plugin package
 plugins/vscode-copilot/ VS Code extension package
 dashboard-minimal/    Minimal event verification UI
 ```
@@ -201,6 +202,11 @@ Codex：
 codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
 codex plugin add observability@tinyai
 ```
+
+Codex marketplace 使用官方目录格式：仓库根目录的 `.agents/plugins/marketplace.json`
+对外发布 `observability@tinyai`，插件实体位于
+`plugins/codex/plugins/observability`。本地维护时，`plugins/codex` 也可以作为一个
+独立 Codex marketplace 根目录使用。
 
 可以直接给 Codex 的话：
 

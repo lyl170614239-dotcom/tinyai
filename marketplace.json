@@ -1,14 +1,14 @@
 {
-  "name": "tinyai-observability-local",
+  "name": "tinyai",
   "interface": {
-    "displayName": "TinyAI Observability Local"
+    "displayName": "TinyAI"
   },
   "plugins": [
     {
-      "name": "tinyai-observability",
+      "name": "observability",
       "source": {
         "source": "local",
-        "path": "./plugins/codex"
+        "path": "./plugins/codex/plugins/observability"
       },
       "policy": {
         "installation": "AVAILABLE",

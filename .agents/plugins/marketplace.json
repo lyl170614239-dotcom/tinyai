@@ -9,7 +9,7 @@
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/lyl170614239-dotcom/tinyai.git",
-        "path": "plugins/codex",
+        "path": "plugins/codex/plugins/observability",
         "ref": "main"
       },
       "policy": {

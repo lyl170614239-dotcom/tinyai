@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const args = parseArgs(process.argv.slice(2));
 const dryRun = Boolean(args["dry-run"]);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const pluginRoot = resolve(String(args["plugin-root"] || join(repoRoot, "plugins", "codex")));
+const pluginRoot = resolve(String(args["plugin-root"] || join(repoRoot, "plugins", "codex", "plugins", "observability")));
 const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
 const manifest = readJson(manifestPath, "Codex plugin manifest");
 const pluginName = String(manifest.name || "").trim();

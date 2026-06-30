@@ -68,6 +68,14 @@ codex plugin add observability@tinyai
 codex plugin list
 ```
 
+仓库里的 Codex 插件按官方 marketplace 结构组织：
+
+```text
+.agents/plugins/marketplace.json          对外安装入口
+plugins/codex/.agents/plugins/marketplace.json  本地 Codex marketplace 入口
+plugins/codex/plugins/observability/      Codex 插件包
+```
+
 如果当前 Codex 版本不支持 `--sparse`，去掉 `--sparse .agents/plugins` 再执行。
 
 也就是说，同事不需要 clone 项目，不需要手动复制插件目录。Claude/Codex 会把这个 Git 仓库当成 plugin marketplace，然后安装里面的 `observability@tinyai`。

@@ -6,7 +6,7 @@ const root = new URL("../", import.meta.url);
 const source = new URL("plugin-runtime/dist/", root);
 const targets = [
   new URL("plugins/claude-code/runtime/dist/", root),
-  new URL("plugins/codex/runtime/dist/", root),
+  new URL("plugins/codex/plugins/observability/runtime/dist/", root),
   new URL("plugins/vscode-copilot/dist/", root)
 ];
 
