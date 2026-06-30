@@ -35,6 +35,7 @@ from ..services.ingest_service import (
     list_usernames,
     overview_counts,
 )
+from ..services.metrics_service import is_user_chat_session
 
 router = APIRouter(prefix="/api/v1", tags=["ingest"])
 _HIDDEN_RELATED_TURN = object()
@@ -698,7 +699,7 @@ def list_recent_sessions(
     query = select(AiSession).order_by(AiSession.last_activity_at.desc(), AiSession.created_at.desc()).limit(limit)
     if username:
         query = query.where(_identity_filter_for_session(username))
-    candidates = [session for session in db.execute(query).scalars().all() if _is_user_chat_session(session)]
+    candidates = [session for session in db.execute(query).scalars().all() if is_user_chat_session(session)]
     candidate_ids = [session.session_id for session in candidates]
     sessions_with_user_messages = set(
         db.execute(
@@ -744,23 +745,6 @@ def _identity_filter_for_session(identity: str):
         AiSession.user_email.in_(candidates),
         AiSession.user_display_name.in_(candidates),
     )
-
-
-def _is_user_chat_session(session: AiSession) -> bool:
-    values = [
-        session.session_id,
-        session.external_session_id,
-        session.task_id,
-        session.title,
-    ]
-    if any(str(value or "").startswith("commit-") for value in values):
-        return False
-    if str(session.task_id or "").startswith("git-commit-"):
-        return False
-    title = str(session.title or "").lower()
-    if "commit" in title and not session.started_at:
-        return False
-    return True
 
 
 def _related_session_ids(session: AiSession) -> set[str]:

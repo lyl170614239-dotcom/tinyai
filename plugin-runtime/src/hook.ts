@@ -96,12 +96,19 @@ function claudeTurnCursorKey(filePath: string): string {
   return stableEventId(`claude-turn-cursor:${filePath}`);
 }
 
-async function startOffsetForClaudeTurnFile(filePath: string, sessionId?: string): Promise<{ startOffset: number; initializedAtEof: boolean }> {
+async function startOffsetForClaudeTurnFile(
+  filePath: string,
+  sessionId?: string,
+  options: { initializeAtEof?: boolean } = {}
+): Promise<{ startOffset: number; initializedAtEof: boolean }> {
   const st = await stat(filePath);
   const store = await loadClaudeTurnCursorStore();
   const key = claudeTurnCursorKey(filePath);
   const existing = store[key];
   if (!existing) {
+    if (options.initializeAtEof === false) {
+      return { startOffset: 0, initializedAtEof: false };
+    }
     store[key] = {
       file_path: filePath,
       read_offset: st.size,
@@ -159,6 +166,32 @@ function claudeBashSnapshotPath(toolCallId?: string, command?: string): string {
   return join(process.env.TINYAI_OBS_BASH_DELTA_DIR || join(homedir(), ".tinyai-observability", "bash-delta"), `${key}.json`);
 }
 
+async function claudeTurnContextForToolCall(toolCallId?: string): Promise<{ requestId?: string; responseId?: string; turnIndex?: number }> {
+  if (!toolCallId || typeof hookSessionFile !== "string") return {};
+  try {
+    const snapshots = await captureLatestClaudeTurnSnapshots({
+      includeText: false,
+      sessionId: hookSessionId,
+      workspacePath,
+      sessionFile: hookSessionFile,
+      latestOnly: false,
+      startOffset: 0
+    });
+    const match = snapshots.find((snapshot) =>
+      snapshot.tool_calls.some((call) => call.tool_call_id === toolCallId) ||
+      snapshot.process_steps.some((step) => step.tool_call_id === toolCallId)
+    );
+    if (!match) return {};
+    return {
+      requestId: match.request_id,
+      responseId: match.response_id,
+      turnIndex: match.turn_index
+    };
+  } catch {
+    return {};
+  }
+}
+
 if (eventType === "task_start" && tool === "claude" && typeof hookSessionFile === "string") {
   await startOffsetForClaudeTurnFile(hookSessionFile, hookSessionId);
 }
@@ -180,9 +213,13 @@ if (rawEventType === "bash_post_tool_use" && tool === "claude" && /bash|shell|te
     const before = await readClaudeBashSnapshot(snapshotPath);
     if (before) {
       await rm(snapshotPath, { force: true });
+      const turnContext = await claudeTurnContextForToolCall(toolCallId);
       const delta = await buildClaudeBashDeltaPayload(workspacePath, before, {
         command,
         sessionId: hookSessionId,
+        requestId: turnContext.requestId,
+        responseId: turnContext.responseId,
+        turnIndex: turnContext.turnIndex,
         toolCallId,
         occurredAt: new Date().toISOString()
       });
@@ -324,7 +361,9 @@ if (eventType === "turn_snapshot" && tool === "claude") {
   events.length = 0;
   const captureText = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_CAPTURE_CONVERSATION_TEXT || "").toLowerCase());
   const sessionFile = typeof hookSessionFile === "string" ? hookSessionFile : undefined;
-  const cursorStart = sessionFile ? await startOffsetForClaudeTurnFile(sessionFile, hookSessionId) : undefined;
+  const cursorStart = sessionFile
+    ? await startOffsetForClaudeTurnFile(sessionFile, hookSessionId, { initializeAtEof: false })
+    : undefined;
   try {
     const snapshots = await captureLatestClaudeTurnSnapshots({
       includeText: captureText,

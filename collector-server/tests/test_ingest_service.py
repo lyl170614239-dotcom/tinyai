@@ -79,6 +79,16 @@ class IngestServiceTests(unittest.TestCase):
                     created_at=now,
                     completed_at=now,
                 ),
+                AiMessage(
+                    session_id="session-metrics",
+                    task_id="task-metrics",
+                    message_index=1,
+                    turn_index=1,
+                    role="user",
+                    content="请参考项目知识库更新代码",
+                    text_len=12,
+                    occurred_at=now,
+                ),
                 AiSpecAccess(
                     session_id="session-metrics",
                     task_id="task-metrics",
@@ -223,6 +233,102 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(by_doc["openspec/specs/b.md"]["related_ai_accepted_added_lines"], 4)
         self.assertEqual(by_doc["openspec/specs/b.md"]["related_adoption_rate"], 0.4)
         self.assertEqual(by_doc["openspec/specs/b.md"]["efficiency_bucket"], "高频低转化")
+
+    def test_knowledge_metrics_session_counts_ignore_git_snapshot_sessions(self):
+        now = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
+        self.db.add_all(
+            [
+                AiSession(
+                    session_id="chat-session",
+                    external_session_id="chat-session",
+                    task_id="chat-task",
+                    tool="copilot",
+                    status="completed",
+                    username="lyl",
+                    user_id="user-1",
+                    started_at=now,
+                    last_activity_at=now,
+                ),
+                AiMessage(
+                    session_id="chat-session",
+                    task_id="chat-task",
+                    message_index=1,
+                    turn_index=1,
+                    role="user",
+                    content="你好",
+                    text_len=2,
+                    occurred_at=now,
+                ),
+                AiTurn(
+                    session_id="chat-session",
+                    task_id="chat-task",
+                    turn_index=1,
+                    request_id="request-chat",
+                    response_id="response-chat",
+                    status="completed",
+                    created_at=now,
+                    completed_at=now,
+                ),
+                AiSession(
+                    session_id="commit-abcdef",
+                    external_session_id="commit-abcdef",
+                    task_id="commit-abcdef",
+                    tool="copilot",
+                    status="active",
+                    username="lyl",
+                    user_id="user-1",
+                    started_at=now,
+                    last_activity_at=now,
+                ),
+                AiSession(
+                    session_id="push-abcdef",
+                    external_session_id="push-abcdef",
+                    task_id="push-abcdef",
+                    tool="copilot",
+                    status="active",
+                    username="lyl",
+                    user_id="user-1",
+                    started_at=now,
+                    last_activity_at=now,
+                ),
+                AiCodeChange(
+                    session_id="commit-abcdef",
+                    task_id="commit-abcdef",
+                    event_id="commit-abcdef",
+                    file_path="src/example.py",
+                    change_type="commit_snapshot",
+                    snapshot_kind="commit_snapshot",
+                    lines_added=1,
+                    lines_deleted=0,
+                    is_effective=True,
+                    diff_json={"snapshot_kind": "commit_snapshot", "file_path": "src/example.py"},
+                    occurred_at=now,
+                ),
+                AiCodeChange(
+                    session_id="push-abcdef",
+                    task_id="push-abcdef",
+                    event_id="push-abcdef",
+                    file_path="src/example.py",
+                    change_type="push_snapshot",
+                    snapshot_kind="push_snapshot",
+                    lines_added=2,
+                    lines_deleted=0,
+                    is_effective=True,
+                    diff_json={"snapshot_kind": "push_snapshot", "file_path": "src/example.py"},
+                    occurred_at=now,
+                ),
+            ]
+        )
+        self.db.commit()
+
+        result = knowledge_metrics(self.db)
+
+        self.assertEqual(result["summary"]["session_count"], 1)
+        self.assertEqual(result["summary"]["task_count"], 1)
+        self.assertEqual(result["summary"]["turn_count"], 1)
+        self.assertEqual(result["summary"]["code_snapshot_count"], 2)
+        self.assertEqual(result["summary"]["commit_snapshot_count"], 1)
+        self.assertEqual(result["summary"]["push_snapshot_count"], 1)
 
     def test_project_doc_related_adoption_flags_high_frequency_low_adoption_docs(self):
         now = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
@@ -1940,6 +2046,99 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(commit_change.diff_json["ai_lines_added"], 1)
         self.assertEqual(commit_change.diff_json["human_lines_added"], 1)
         self.assertEqual(commit_change.diff_json["matched_ai_change_event_ids"], ["code-change-files-blob"])
+
+    def test_claude_bash_delta_without_turn_identity_is_not_attached_to_previous_turn(self):
+        turn_event = EventIn(
+            event_id="claude-turn-one",
+            task_id="claude-session-orphan",
+            session_id="claude-session-orphan",
+            tool="claude",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 6, 30, 9, 59, 14, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "claude-session-orphan",
+                "request_id": "request-one",
+                "response_id": "response-one",
+                "turn_index": 1,
+                "turn": {
+                    "turn_index": 1,
+                    "request_id": "request-one",
+                    "response_id": "response-one",
+                    "status": "completed",
+                    "started_at": "2026-06-30T09:59:04Z",
+                    "completed_at": "2026-06-30T09:59:14Z",
+                },
+                "messages": [
+                    {
+                        "role": "user",
+                        "text": "大师傅",
+                        "source_key": "request-one:user",
+                        "occurred_at": "2026-06-30T09:59:04Z",
+                    },
+                    {
+                        "role": "assistant",
+                        "text": "你好",
+                        "source_key": "response-one:assistant",
+                        "occurred_at": "2026-06-30T09:59:14Z",
+                    },
+                ],
+            },
+        )
+        orphan_delta = EventIn(
+            event_id="claude-bash-delta-no-turn",
+            task_id="claude-session-orphan",
+            session_id="claude-session-orphan",
+            tool="claude",
+            event_type="code_change",
+            occurred_at=datetime(2026, 6, 30, 10, 0, 29, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "claude-session-orphan",
+                "snapshot_kind": "claude_turn_bash_delta",
+                "trigger": "claude_code_bash_post_tool_use",
+                "tool_call_id": "tool-second-turn",
+                "files_changed": 1,
+                "lines_added": 1,
+                "lines_deleted": 0,
+                "files": [
+                    {
+                        "file_path": "src/arch.md",
+                        "lines_added": 1,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 1,
+                                "lines": [{"line_type": "added", "new_line": 1, "text": "architecture"}],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-claude",
+            plugin_name="tinyai-observability-claude",
+            plugin_version="0.1.8",
+            username="lyl",
+            user_id="user-1",
+            events=[turn_event, orphan_delta],
+        )
+
+        ingest_batch(self.db, batch)
+        process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        change = self.db.execute(select(AiCodeChange).where(AiCodeChange.event_id == "claude-bash-delta-no-turn")).scalars().one()
+
+        self.assertIsNone(change.turn_id)
+        self.assertIsNone(change.turn_index)
+        self.assertIsNone(change.request_id)
 
     def test_code_change_effective_keeps_only_latest_workspace_result_per_file(self):
         def code_event(event_id: str, request_id: str, response_id: str, occurred_at: datetime, lines_added: int) -> EventIn:

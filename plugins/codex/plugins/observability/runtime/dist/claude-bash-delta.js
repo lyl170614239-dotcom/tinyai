@@ -192,7 +192,9 @@ async function fileChange(workspacePath, filePath, before) {
     const after = await snapshotFile(workspacePath, filePath);
     if (before?.kind === "directory" || after.kind === "directory")
         return undefined;
-    const beforeBuffer = snapshotContent(before) ?? await headFile(workspacePath, filePath) ?? Buffer.alloc(0);
+    const beforeBuffer = before
+        ? snapshotContent(before) ?? Buffer.alloc(0)
+        : await headFile(workspacePath, filePath) ?? Buffer.alloc(0);
     const afterBuffer = snapshotContent(after) ?? Buffer.alloc(0);
     const beforeHash = sha256(beforeBuffer);
     const afterHash = sha256(afterBuffer);

@@ -768,6 +768,7 @@ def _turn_for_time(turns: list[AiTurn], occurred_at: datetime) -> AiTurn | None:
 def _turn_for_change(turns: list[AiTurn], change: dict[str, Any], occurred_at: datetime) -> AiTurn | None:
     request_id = str(change.get("request_id") or "")[:256] or None
     response_id = str(change.get("response_id") or "")[:256] or None
+    snapshot_kind = str(change.get("snapshot_kind") or change.get("change_type") or "").lower()
     if request_id:
         for turn in turns:
             if turn.request_id != request_id:
@@ -775,10 +776,16 @@ def _turn_for_change(turns: list[AiTurn], change: dict[str, Any], occurred_at: d
             if response_id and turn.response_id and turn.response_id != response_id:
                 continue
             return turn
+        if snapshot_kind == "claude_turn_bash_delta":
+            return None
     if isinstance(change.get("turn_index"), int):
         for turn in turns:
             if turn.turn_index == int(change["turn_index"]):
                 return turn
+        if snapshot_kind == "claude_turn_bash_delta":
+            return None
+    if snapshot_kind == "claude_turn_bash_delta":
+        return None
     return _turn_for_time(turns, occurred_at)
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from statistics import median
-from typing import Any
+from typing import Any, Iterable
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -331,6 +331,36 @@ def _success_result(result: str | None) -> bool:
     return normalized in {"success", "succeeded", "done", "completed", "accepted", "pass", "passed", "fixed", "ok"}
 
 
+def is_user_chat_session(session: AiSession) -> bool:
+    values = [
+        session.session_id,
+        session.external_session_id,
+        session.task_id,
+        session.title,
+    ]
+    if any(str(value or "").startswith("commit-") for value in values):
+        return False
+    if str(session.task_id or "").startswith("git-commit-"):
+        return False
+    title = str(session.title or "").lower()
+    if "commit" in title and not session.started_at:
+        return False
+    return True
+
+
+def user_chat_session_ids(sessions: Iterable[AiSession], messages: Iterable[AiMessage]) -> set[str]:
+    sessions_with_user_messages = {
+        message.session_id
+        for message in messages
+        if message.role == "user"
+    }
+    return {
+        session.session_id
+        for session in sessions
+        if is_user_chat_session(session) and session.session_id in sessions_with_user_messages
+    }
+
+
 def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any]:
     if username:
         sessions = db.execute(select(AiSession).where(_identity_filter(AiSession, username))).scalars().all()
@@ -338,7 +368,6 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
         sessions = db.execute(select(AiSession)).scalars().all()
 
     session_ids = {session.session_id for session in sessions}
-    session_units = set(session_ids)
     if username:
         event_query = select(RawIngestEvent).where(
             or_(
@@ -399,6 +428,18 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
 
     pr_attributions = db.execute(select(PullRequestAttribution)).scalars().all()
     code_changes = _effective_code_changes(code_changes)
+    chat_session_ids = user_chat_session_ids(sessions, messages)
+    sessions = [session for session in sessions if session.session_id in chat_session_ids]
+    session_units = set(chat_session_ids)
+    chat_task_ids = {session.task_id for session in sessions if session.task_id}
+    turns = [turn for turn in turns if turn.session_id in chat_session_ids]
+    messages = [message for message in messages if message.session_id in chat_session_ids]
+    process_steps = [step for step in process_steps if step.session_id in chat_session_ids]
+    request_usage = [
+        usage
+        for usage in request_usage
+        if usage.session_id in chat_session_ids or (usage.task_id and usage.task_id in chat_task_ids)
+    ]
 
     task_count = len(session_units)
     ended_tasks = {
