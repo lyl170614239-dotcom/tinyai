@@ -27,7 +27,10 @@ codex plugin list
 ```
 
 After installation, restart Codex or open a new Codex thread so the MCP server
-loads the installed plugin version.
+loads the installed plugin version. The install smoke heartbeat only proves
+collector reachability. Real Codex capture starts after a fresh session uploads
+a heartbeat with `payload.mcp=true`, followed by `turn_snapshot` data after a
+completed turn.
 
 ## Local Development Install
 

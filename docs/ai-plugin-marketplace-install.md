@@ -54,7 +54,9 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 安装完成后请自动验证：
 1. observability@tinyai 已启用
 2. collector 可以连通
-3. 成功上报一条 tool=codex 的测试心跳
+3. 成功上报一条 tool=codex 的安装烟测心跳，payload 里应是 install_smoke=true、mcp=false
+4. 提醒我重启 Codex 或打开新会话；重启后才可能出现真实 MCP 心跳
+5. 新会话完成一轮对话后，应出现 tool=codex 的真实 MCP 心跳 payload.mcp=true 和 turn_snapshot/session 数据
 
 如果验证失败，请直接告诉我失败原因。
 验证成功后，提醒我重启 Codex 或打开新会话。
@@ -106,7 +108,9 @@ codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git -
 codex plugin add observability@tinyai
 ```
 
-安装后重启 Codex，或开启一个新的 Codex 会话。
+安装烟测心跳只代表 collector 可连通，不代表 Codex 已经加载 MCP。安装后重启 Codex，
+或开启一个新的 Codex 会话。真实采集开始的判断标准是：出现 `tool=codex` 且 payload
+里 `mcp=true` 的真实 MCP 心跳，并在完成一轮对话后出现 `turn_snapshot`。
 
 后续升级：
 

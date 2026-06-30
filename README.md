@@ -225,7 +225,9 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 安装完成后请自动验证：
 1. observability@tinyai 已启用
 2. collector 可以连通
-3. 成功上报一条 tool=codex 的测试心跳
+3. 成功上报一条 tool=codex 的安装烟测心跳，payload 里应是 install_smoke=true、mcp=false
+4. 提醒我重启 Codex 或打开新会话；重启后才可能出现真实 MCP 心跳
+5. 新会话完成一轮对话后，应出现 tool=codex 的真实 MCP 心跳 payload.mcp=true 和 turn_snapshot/session 数据
 
 如果验证失败，请直接告诉我失败原因。
 验证成功后，提醒我重启 Codex 或打开新会话。
@@ -242,7 +244,11 @@ Codex plugin       -> tool=codex
 `install-tinyai-observability` skill 才会生效。之后同事说“更新 TinyAI 插件”或“检查
 TinyAI 插件”，AI 就可以按 skill 自动执行更新和验证。
 
-安装完成后，同事只需要重启 Claude Code / Codex，然后正常提问即可。dashboard 的“采集状态”里会按 `Copilot / Claude / Codex` 分别展示版本、心跳、会话、工具、代码和知识库链路。
+安装烟测心跳只代表 collector 可连通，不代表 Codex 已经加载 MCP。安装完成后，同事必须
+重启 Claude Code / Codex，或打开新的 Codex 会话，然后正常提问。dashboard 的“采集状态”
+里会按 `Copilot / Claude / Codex` 分别展示版本、心跳、会话、工具、代码和知识库链路。
+Codex 真实采集开始的判断标准是：出现 `tool=codex` 且 payload 里 `mcp=true` 的真实
+MCP 心跳，并在完成一轮对话后出现 `turn_snapshot`。
 
 升级：
 

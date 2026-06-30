@@ -163,19 +163,24 @@ If the email is unknown, omit both `TINYAI_OBS_USER_EMAIL` and
 `TINYAI_OBS_CODEX_USER_ID` to the confirmed name. Do not leave the user as
 `user` or `unknown` unless the user explicitly refuses to provide a name.
 
-4. Run the collector smoke test below. Do not claim installation succeeded if
-the smoke test fails.
+4. Run the collector smoke test below. Do not claim collector connectivity
+succeeded if the smoke test fails.
 
 5. Ask the user to restart Codex or open a new Codex session so the plugin MCP
 process reloads the env file. The smoke test only proves that the collector can
-accept data; real conversation capture starts after the Codex MCP server is
-loaded in a fresh session.
+accept data; it does not prove that Codex has loaded the MCP server. Real
+conversation capture starts only after a fresh Codex session initializes the
+MCP server and uploads a `plugin_heartbeat` whose payload contains `"mcp": true`.
 
 ## Collector smoke test after install
 
-Run this smoke test after writing identity and before telling the user the
-installation is complete. It verifies both collector reachability and TinyAI
-ingest acceptance by posting one `plugin_heartbeat` event.
+Run this smoke test after writing identity and before telling the user to
+restart Codex. It verifies collector reachability and TinyAI ingest acceptance
+by posting one `plugin_heartbeat` event.
+
+This is an install smoke heartbeat, not a real MCP heartbeat. It must include
+`install_smoke: true` and `mcp: false` so the dashboard and DB can distinguish
+it from a fresh Codex session that has actually loaded the plugin MCP server.
 
 ```bash
 TINYAI_ENV="$HOME/.tinyai-observability/tinyai-observability.env"
@@ -269,6 +274,8 @@ payload = {
             "host_hash": host_hash,
             "payload": {
                 "smoke_test": True,
+                "install_smoke": True,
+                "mcp": False,
                 "source": "install-tinyai-observability",
                 "env_file": sys.argv[1],
                 "expected_runtime_plugin_version": plugin_version,
@@ -299,7 +306,8 @@ if [ "$SMOKE_STATUS" -ne 0 ]; then
   exit "$SMOKE_STATUS"
 fi
 
-echo "TinyAI Codex smoke test passed: collector accepted plugin_heartbeat."
+echo "TinyAI Codex collector smoke test passed: collector accepted install_smoke plugin_heartbeat."
+echo "Restart Codex or open a new Codex session, then verify a real MCP heartbeat with payload.mcp=true and a codex turn_snapshot."
 ```
 
 ## Update
@@ -316,11 +324,15 @@ codex plugin list
 2. The env file should contain both `TINYAI_OBS_USER_NAME` and
    `TINYAI_OBS_CODEX_USER_NAME`.
 3. The collector smoke test should pass and create a `tool=codex`
-   `plugin_heartbeat` with the installed plugin version. This smoke heartbeat
-   should not be treated as real conversation telemetry.
+   `plugin_heartbeat` with `payload.install_smoke=true` and `payload.mcp=false`.
+   This smoke heartbeat only proves collector reachability and should not be
+   treated as real conversation telemetry.
 4. Restart Codex or open a new Codex session.
 5. Ask a simple question in Codex.
-6. Check the TinyAI dashboard for a real `tool=codex` session under the
+6. Check TinyAI for a real `tool=codex` heartbeat whose payload contains
+   `mcp=true`. If only install-smoke heartbeats exist, Codex has not loaded the
+   MCP server yet and no conversation data can be captured.
+7. Check the TinyAI dashboard for a real `tool=codex` session under the
    confirmed user. The real MCP heartbeat and session data should use the
    installed plugin version, not `install-smoke`.
 
