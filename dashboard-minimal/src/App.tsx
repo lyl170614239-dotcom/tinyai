@@ -242,100 +242,12 @@ type PluginClientGroup = {
   tools: string[];
 };
 
-type RuntimeToolGroup = {
-  tool: string;
-  label: string;
-  clients: PluginClient[];
-  activeClients: PluginClient[];
-  heartbeats: PluginHeartbeat[];
-  versions: string[];
-  latestAt: string | null;
-};
-
-type RuntimeCheckStatus = "ok" | "warn" | "idle" | "missing";
-
-type RuntimeCheck = {
-  key: string;
-  label: string;
-  status: RuntimeCheckStatus;
-  count: number;
-  latest_at: string | null;
-  note: string;
-};
-
-type RuntimeToolStatus = {
-  tool: string;
-  status: RuntimeCheckStatus;
-  latest_activity_at: string | null;
-  versions: string[];
-  registered_clients: number;
-  active_clients: number;
-  heartbeat_count: number;
-  session_count: number;
-  turn_count: number;
-  tool_step_count: number;
-  code_change_count: number;
-  spec_access_count: number;
-  checks: RuntimeCheck[];
-};
-
-type RuntimeStatusResponse = {
-  generated_at: string;
-  active_window_minutes: number;
-  tools: RuntimeToolStatus[];
-};
-
-type PluginHeartbeat = {
-  event_id: string;
-  client_id: string;
-  plugin_name: string | null;
-  plugin_version: string | null;
-  tool: string;
-  username: string | null;
-  user_id: string | null;
-  user_email: string | null;
-  user_display_name: string | null;
-  team: string | null;
-  machine_id: string | null;
-  host_hash: string | null;
-  payload: Record<string, unknown> | null;
-  occurred_at: string;
-  created_at: string;
-};
-
 type DashboardView = "metrics" | "knowledge" | "code" | "sessions";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function uniqueValues(values: string[]) {
   return values.filter((value, index) => value && values.indexOf(value) === index);
-}
-
-function toolLabel(tool: string | null | undefined) {
-  const normalized = String(tool || "unknown").toLowerCase();
-  if (normalized === "copilot") return "Copilot";
-  if (normalized === "claude") return "Claude";
-  if (normalized === "codex") return "Codex";
-  if (normalized === "unknown") return "未知工具";
-  return normalized.replace(/(^|-|_)([a-z])/g, (_, prefix: string, char: string) => `${prefix === "_" ? " " : prefix}${char.toUpperCase()}`).trim();
-}
-
-function versionLabel(versions: string[]) {
-  if (!versions.length) return "版本未知";
-  return versions.map((version) => `v${version}`).join(" / ");
-}
-
-function runtimeStatusLabel(status: RuntimeCheckStatus) {
-  if (status === "ok") return "正常";
-  if (status === "warn") return "待检查";
-  if (status === "idle") return "空闲";
-  return "未检测";
-}
-
-function runtimeStatusTone(status: RuntimeCheckStatus): "good" | "warn" | "default" {
-  if (status === "ok") return "good";
-  if (status === "warn" || status === "missing") return "warn";
-  return "default";
 }
 
 function resolveApiBases() {
@@ -610,46 +522,6 @@ function groupPluginClients(clients: PluginClient[]): PluginClientGroup[] {
   }
 
   return groups.sort((a, b) => (parseDate(b.last_seen_at)?.getTime() ?? 0) - (parseDate(a.last_seen_at)?.getTime() ?? 0));
-}
-
-function groupRuntimeByTool(clients: PluginClient[], heartbeats: PluginHeartbeat[]): RuntimeToolGroup[] {
-  const toolKeys = uniqueValues([
-    ...clients.map((client) => client.tool || "unknown"),
-    ...heartbeats.map((heartbeat) => heartbeat.tool || "unknown"),
-  ]);
-  return toolKeys.map((tool) => {
-    const toolClients = clients.filter((client) => (client.tool || "unknown") === tool);
-    const toolHeartbeats = heartbeats.filter((heartbeat) => (heartbeat.tool || "unknown") === tool);
-    const latestClientAt = toolClients.reduce<string | null>((latest, client) => {
-      if (!latest) return client.last_seen_at;
-      return (parseDate(client.last_seen_at)?.getTime() ?? 0) > (parseDate(latest)?.getTime() ?? 0) ? client.last_seen_at : latest;
-    }, null);
-    const latestHeartbeatAt = toolHeartbeats.reduce<string | null>((latest, heartbeat) => {
-      if (!latest) return heartbeat.occurred_at;
-      return (parseDate(heartbeat.occurred_at)?.getTime() ?? 0) > (parseDate(latest)?.getTime() ?? 0) ? heartbeat.occurred_at : latest;
-    }, null);
-    const latestAt = [latestClientAt, latestHeartbeatAt]
-      .filter(Boolean)
-      .sort((a, b) => (parseDate(b || "")?.getTime() ?? 0) - (parseDate(a || "")?.getTime() ?? 0))[0] || null;
-    return {
-      tool,
-      label: toolLabel(tool),
-      clients: toolClients,
-      activeClients: toolClients.filter((client) => minutesSince(client.last_seen_at) <= 30),
-      heartbeats: toolHeartbeats,
-      versions: uniqueValues([
-        ...toolClients.map((client) => client.plugin_version || "").filter(Boolean),
-        ...toolHeartbeats.map((heartbeat) => heartbeat.plugin_version || "").filter(Boolean),
-      ]),
-      latestAt,
-    };
-  }).sort((a, b) => {
-    const preferred = ["copilot", "claude", "codex"];
-    const ai = preferred.indexOf(a.tool);
-    const bi = preferred.indexOf(b.tool);
-    if (ai !== -1 || bi !== -1) return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-    return a.label.localeCompare(b.label);
-  });
 }
 
 function readableValue(value: unknown, fallback = ""): string {
@@ -1715,137 +1587,6 @@ function SessionUsageCards({ detail }: { detail: AiSessionDetail }) {
   );
 }
 
-function RuntimeHealth({
-  clients,
-  heartbeats,
-  runtimeStatus,
-  error,
-}: {
-  clients: PluginClient[];
-  heartbeats: PluginHeartbeat[];
-  runtimeStatus: RuntimeStatusResponse | null;
-  error: string;
-}) {
-  const clientGroups = groupPluginClients(clients);
-  const activeClientGroups = clientGroups.filter((group) => minutesSince(group.last_seen_at) <= 30);
-  const latestHeartbeat = heartbeats[0];
-  const runtimeToolGroups = groupRuntimeByTool(clients, heartbeats);
-  const runtimeTools = runtimeStatus?.tools || [];
-
-  return (
-    <div className="runtime-health">
-      <div className="health-hero">
-        <span className={`health-orb ${error ? "warn" : "online"}`} />
-        <div>
-          <strong>{error ? "采集服务异常" : "采集服务在线"}</strong>
-          <span>{latestHeartbeat ? `最近心跳 ${fmtTime(latestHeartbeat.occurred_at)}` : "等待首次心跳"}</span>
-        </div>
-      </div>
-
-      <div className="health-metrics">
-        <div>
-          <span>活跃采集端</span>
-          <strong>{activeClientGroups.length}</strong>
-        </div>
-        <div>
-          <span>注册采集端</span>
-          <strong>{clientGroups.length}</strong>
-        </div>
-        <div>
-          <span>采集工具</span>
-          <strong>{runtimeToolGroups.length || "—"}</strong>
-        </div>
-      </div>
-
-      <div className="runtime-tool-list">
-        {runtimeTools.length === 0 ? (
-          <div className="empty compact">暂无分工具采集状态</div>
-        ) : runtimeTools.map((tool) => (
-          <div className={`runtime-tool-card status-${tool.status}`} key={tool.tool}>
-            <div className="runtime-tool-head">
-              <span className={`tool-version-pill tool-${tool.tool}`}>{toolLabel(tool.tool)}</span>
-              <Badge tone={runtimeStatusTone(tool.status)}>{runtimeStatusLabel(tool.status)}</Badge>
-            </div>
-            <div className="runtime-tool-title">
-              <strong>{versionLabel(tool.versions)}</strong>
-              <small>
-                {tool.active_clients} 在线 / {tool.registered_clients} 注册
-                {tool.latest_activity_at ? ` · 最近 ${fmtTime(tool.latest_activity_at)}` : ""}
-              </small>
-            </div>
-            <div className="runtime-tool-stats">
-              <span>会话 {fmtNumber(tool.session_count)}</span>
-              <span>轮次 {fmtNumber(tool.turn_count)}</span>
-              <span>工具 {fmtNumber(tool.tool_step_count)}</span>
-              <span>代码 {fmtNumber(tool.code_change_count)}</span>
-              <span>知识库 {fmtNumber(tool.spec_access_count)}</span>
-            </div>
-            <div className="runtime-check-grid">
-              {tool.checks.map((check) => (
-                <div className={`runtime-check status-${check.status}`} key={check.key} title={check.note}>
-                  <span>{check.label}</span>
-                  <strong>{fmtNumber(check.count)}</strong>
-                  <small>{runtimeStatusLabel(check.status)}</small>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {runtimeTools.length === 0 && runtimeToolGroups.length > 0 && (
-        <div className="tool-version-list">
-          {runtimeToolGroups.map((group) => (
-            <div className="tool-version-row" key={group.tool}>
-              <span className={`tool-version-pill tool-${group.tool}`}>{group.label}</span>
-              <div className="tool-version-main">
-                <strong>{versionLabel(group.versions)}</strong>
-                <small>
-                  {group.activeClients.length} 在线 / {group.clients.length} 注册
-                  {group.latestAt ? ` · 最近 ${fmtTime(group.latestAt)}` : ""}
-                </small>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {error && <div className="runtime-warning">{error}</div>}
-
-      <details className="health-more">
-        <summary>查看采集链路详情</summary>
-        <div className="health-detail-stack">
-          <div className="health-section">
-            <div className="health-section-title">采集端</div>
-            <div className="health-list">
-              {clientGroups.length === 0 ? (
-                <div className="empty compact">暂无采集端</div>
-              ) : clientGroups.slice(0, 4).map((group) => (
-                <div className="health-row" key={group.key}>
-                  <span className={`health-dot ${minutesSince(group.last_seen_at) <= 30 ? "online" : "idle"}`} />
-                  <div className="health-row-main">
-                    <strong>{personName(group.representative)}</strong>
-                    <span>{personEmail(group.representative)}</span>
-                    <small>
-                      {group.tools.length ? `${group.tools.map(toolLabel).join(" / ")} · ` : ""}
-                      {group.clients.length > 1 ? `${group.clients.length} 个客户端实例` : "1 个客户端实例"}
-                      {group.plugin_versions.length ? ` · ${versionLabel(group.plugin_versions)}` : ""}
-                    </small>
-                  </div>
-                  <div className="health-row-side">
-                    <span>{fmtTime(group.last_seen_at)}</span>
-                    <small>{minutesSince(group.last_seen_at) <= 30 ? "在线" : "空闲"}</small>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </details>
-    </div>
-  );
-}
-
 function SessionTimeline({ detail }: { detail: AiSessionDetail | null }) {
   if (!detail) {
     return <div className="empty">选择一个会话查看完整对话</div>;
@@ -2425,14 +2166,11 @@ export default function App() {
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [globalCodeChanges, setGlobalCodeChanges] = useState<AiCodeChange[]>([]);
   const [pluginClients, setPluginClients] = useState<PluginClient[]>([]);
-  const [pluginHeartbeats, setPluginHeartbeats] = useState<PluginHeartbeat[]>([]);
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatusResponse | null>(null);
   const [users, setUsers] = useState<string[]>([]);
   const [selectedUser, setSelectedUser] = useState<string>("");
   const [activeView, setActiveView] = useState<DashboardView>("metrics");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string>("");
-  const [runtimeError, setRuntimeError] = useState<string>("");
 
   async function loadUsers() {
     const res = await apiFetch("/api/v1/users");
@@ -2468,29 +2206,13 @@ export default function App() {
   }
 
   async function loadRuntime() {
-    const errors: string[] = [];
     try {
       const res = await apiFetch("/api/v1/plugins");
       setPluginClients(await res.json());
     } catch (error) {
-      errors.push(`插件客户端：${error instanceof Error ? error.message : String(error)}`);
+      console.error(error);
       setPluginClients([]);
     }
-    try {
-      const res = await apiFetch("/api/v1/plugin-heartbeats?limit=50");
-      setPluginHeartbeats(await res.json());
-    } catch (error) {
-      errors.push(`采集心跳：${error instanceof Error ? error.message : String(error)}`);
-      setPluginHeartbeats([]);
-    }
-    try {
-      const res = await apiFetch("/api/v1/runtime/status");
-      setRuntimeStatus(await res.json());
-    } catch (error) {
-      errors.push(`工具链路：${error instanceof Error ? error.message : String(error)}`);
-      setRuntimeStatus(null);
-    }
-    setRuntimeError(errors.join(" · "));
   }
 
   async function loadSessionDetail(sessionId: string) {
@@ -2624,16 +2346,6 @@ export default function App() {
                   </button>
                 ))}
             </nav>
-            <section className="sidebar-health-card">
-              <div className="sidebar-health-head">
-                <div>
-                  <h3>采集状态</h3>
-                  <p>采集链路状态</p>
-                </div>
-                <Badge tone={runtimeError ? "warn" : "good"}>{runtimeError ? "异常" : "正常"}</Badge>
-              </div>
-              <RuntimeHealth clients={pluginClients} heartbeats={pluginHeartbeats} runtimeStatus={runtimeStatus} error={runtimeError} />
-            </section>
           </div>
         </aside>
 
