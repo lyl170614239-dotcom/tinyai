@@ -199,7 +199,7 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 Codex：
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 ```
 
@@ -207,6 +207,11 @@ Codex marketplace 使用官方目录格式：仓库根目录的 `.agents/plugins
 对外发布 `observability@tinyai`，插件实体位于
 `plugins/codex/plugins/observability`。本地维护时，`plugins/codex` 也可以作为一个
 独立 Codex marketplace 根目录使用。
+
+这个仓库是开发用 monorepo；同事安装插件时必须使用 sparse 路径，只拉取 marketplace
+入口和插件包，不需要 clone collector、dashboard、测试或源码目录。需要一个完全不含
+非插件代码的 Git 仓库时，应新建独立插件发布仓库，只保留 `.agents/plugins`、
+`.claude-plugin`、`plugins/codex/plugins/observability` 和 `plugins/claude-code`。
 
 可以直接给 Codex 的话：
 

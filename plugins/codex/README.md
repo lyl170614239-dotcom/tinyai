@@ -21,7 +21,7 @@ Teammates normally do not need to clone this repository. They can install from
 the Git marketplace entry exposed at the repository root:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 codex plugin list
 ```

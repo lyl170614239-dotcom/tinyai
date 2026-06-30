@@ -63,7 +63,7 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 Codex 应该执行的实际命令是：
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -76,9 +76,12 @@ plugins/codex/.agents/plugins/marketplace.json  本地 Codex marketplace 入口
 plugins/codex/plugins/observability/      Codex 插件包
 ```
 
-如果当前 Codex 版本不支持 `--sparse`，去掉 `--sparse .agents/plugins` 再执行。
+如果当前 Codex 版本不支持 `--sparse`，去掉 sparse 参数再执行，但这会临时拉取更多
+monorepo 内容；能支持 sparse 时必须保留上面的两个 sparse 路径。
 
-也就是说，同事不需要 clone 项目，不需要手动复制插件目录。Claude/Codex 会把这个 Git 仓库当成 plugin marketplace，然后安装里面的 `observability@tinyai`。
+也就是说，同事不需要 clone 项目，不需要手动复制插件目录。Claude/Codex 会把这个 Git
+仓库当成 plugin marketplace，并通过 sparse checkout 只获取插件相关路径，然后安装里面
+的 `observability@tinyai`。
 
 ## Claude Code
 
@@ -99,7 +102,7 @@ claude plugin update observability@tinyai
 ## Codex
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 ```
 
