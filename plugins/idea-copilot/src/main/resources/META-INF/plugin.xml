@@ -1,0 +1,35 @@
+<idea-plugin>
+    <id>com.tinyai.observability.idea</id>
+    <name>TinyAI Observability IDEA</name>
+    <vendor>TinyAI</vendor>
+    <description><![CDATA[
+        Captures JetBrains IDE Copilot-related local logs for TinyAI Observability.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="com.tinyai.observability.idea.TinyAiStartupActivity"/>
+        <applicationConfigurable
+            id="tinyai.observability.settings"
+            instance="com.tinyai.observability.idea.TinyAiSettingsConfigurable"
+            displayName="TinyAI Observability"/>
+    </extensions>
+
+    <actions>
+        <action
+            id="TinyAiObservability.CaptureCopilotLogs"
+            class="com.tinyai.observability.idea.CaptureCopilotLogsAction"
+            text="TinyAI Observability: Capture Copilot Logs"
+            description="Scan local JetBrains Copilot logs and upload TinyAI telemetry">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+        <action
+            id="TinyAiObservability.SendHeartbeat"
+            class="com.tinyai.observability.idea.SendHeartbeatAction"
+            text="TinyAI Observability: Send Heartbeat"
+            description="Send a TinyAI IDEA plugin heartbeat">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
