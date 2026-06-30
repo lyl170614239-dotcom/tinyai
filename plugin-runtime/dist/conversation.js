@@ -113,6 +113,19 @@ function canonicalSessionIdForFile(sessionId, filePath) {
         return fileSessionId;
     return sessionId;
 }
+function jsonlPayloadType(line) {
+    try {
+        const parsed = JSON.parse(line);
+        const payload = parsed?.payload;
+        return payload && typeof payload === "object" && typeof payload.type === "string" ? payload.type : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function codexLinesContainPayloadType(lines, type) {
+    return lines.some((line) => jsonlPayloadType(line) === type);
+}
 async function readCompleteJsonlLines(filePath, offset, fileSize) {
     if (offset >= fileSize)
         return { lines: [], nextOffset: offset };
@@ -630,9 +643,18 @@ export async function captureLatestCodexConversation(options = {}) {
     if (!file)
         throw new Error("No Codex session file found under ~/.codex/sessions");
     const includeText = Boolean(options.includeText);
-    const { lines, cursor, state } = await readIncrementalJsonlLines("codex", file, {
+    const { lines: incrementalLines, cursor, state } = await readIncrementalJsonlLines("codex", file, {
         bootstrapAtEof: !options.sessionFile
     });
+    let lines = incrementalLines;
+    if (options.latestTurnOnly &&
+        incrementalLines.length > 0 &&
+        codexLinesContainPayloadType(incrementalLines, "task_complete") &&
+        !codexLinesContainPayloadType(incrementalLines, "user_message")) {
+        const full = await readCompleteJsonlLines(file, 0, cursor.file_size);
+        if (full.lines.length > incrementalLines.length)
+            lines = full.lines;
+    }
     if (lines.length === 0) {
         return emptyConversationSnapshot({
             tool: "codex",

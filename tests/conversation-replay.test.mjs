@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 import {
@@ -74,4 +77,82 @@ test("Codex replay derives code edits from apply_patch input", async () => {
   assert.equal(snapshot.code_edits?.[0]?.lines_added, 3);
   assert.equal(snapshot.code_edits?.[0]?.lines_deleted, 0);
   assert.equal(snapshot.code_edits?.[0]?.hunks[0]?.lines[0]?.text, "# 刘芸隆的开心故事");
+});
+
+test("Codex replay recovers latest turn context when cursor starts after the user message", async () => {
+  const previousCursorDir = process.env.TINYAI_OBS_CURSOR_DIR;
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-cursor-`);
+  process.env.TINYAI_OBS_CURSOR_DIR = dir;
+  try {
+    const sessionFile = `${dir}/rollout-2026-06-30T14-44-58-019f1746-1bb0-7281-b6cc-487a7020ddd0.jsonl`;
+    const prefix = [
+      JSON.stringify({ type: "session_meta", payload: { id: "cursor-session", cwd: "/tmp/project" } }),
+      JSON.stringify({
+        timestamp: "2026-06-30T06:45:06.668Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "修改李白md，添加他的故事\n" }
+      })
+    ].join("\n") + "\n";
+    const suffix = [
+      JSON.stringify({
+        timestamp: "2026-06-30T06:46:03.734Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "我准备修改李白.md。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T06:46:21.351Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** Update File: 李白.md\n@@\n-旧\n+新\n*** End Patch\n"
+        }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T06:46:36.447Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "已修改李白.md。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-06-30T06:46:36.559Z",
+        type: "event_msg",
+        payload: { type: "task_complete", duration_ms: 92376 }
+      })
+    ].join("\n") + "\n";
+    await writeFile(sessionFile, prefix + suffix, "utf8");
+    const info = await stat(sessionFile);
+    const cursorOffset = Buffer.byteLength(prefix, "utf8");
+    const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 32);
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      `${dir}/codex-conversation-cursors.json`,
+      JSON.stringify({
+        [key]: {
+          file_path: sessionFile,
+          file_size: cursorOffset,
+          read_offset: cursorOffset,
+          updated_at: "2026-06-30T06:45:07.394Z",
+          session_id: "cursor-session"
+        }
+      }),
+      "utf8"
+    );
+
+    const snapshot = await captureLatestCodexConversation({
+      includeText: true,
+      latestTurnOnly: true,
+      sessionFile
+    });
+
+    assert.equal(info.size > cursorOffset, true);
+    assert.equal(snapshot.latest_turn_complete, true);
+    assert.deepEqual(snapshot.messages.map((message) => [message.role, message.text]), [
+      ["user", "修改李白md，添加他的故事\n"],
+      ["assistant", "已修改李白.md。"]
+    ]);
+    assert.equal(snapshot.code_edits?.[0]?.file_path, "李白.md");
+  } finally {
+    if (previousCursorDir === undefined) delete process.env.TINYAI_OBS_CURSOR_DIR;
+    else process.env.TINYAI_OBS_CURSOR_DIR = previousCursorDir;
+  }
 });
