@@ -262,6 +262,50 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["spec_accesses"][0]["doc_path"], "openspec/specs/a.md")
         self.assertEqual(normalized["request_usage"][0]["credits_source"], "claude")
 
+    def test_claude_turn_snapshot_cleans_agent_prompt_and_ide_context(self):
+        agent_prompt = (
+            "I need to understand the system architecture of the ai-observability project at "
+            "/Users/user/code/ai-observability.\n\nPlease do a thorough exploration:"
+        )
+        payload = {
+            "session_id": "claude-session",
+            "request_id": "request-architecture",
+            "response_id": "response-architecture",
+            "title": "<ide_opened_file>The user opened clear_tinyobs_data.py.</ide_opened_file>\n给我看看系统架构",
+            "turn": {
+                "turn_index": 1,
+                "request_id": "request-architecture",
+                "response_id": "response-architecture",
+                "status": "completed",
+            },
+            "messages": [
+                {"role": "user", "text": agent_prompt, "source_key": "request-agent"},
+                {
+                    "role": "user",
+                    "text": "<ide_opened_file>The user opened clear_tinyobs_data.py.</ide_opened_file>\n给我看看系统架构",
+                    "source_key": "request-architecture",
+                },
+                {"role": "assistant", "text": "## TinyAI Observability — 系统架构", "source_key": "response-architecture"},
+            ],
+            "tool_calls": [
+                {
+                    "tool_name": "agent",
+                    "tool_call_id": "call-agent",
+                    "arguments_raw": {"prompt": agent_prompt},
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(normalized["session"]["title"], "给我看看系统架构")
+        self.assertEqual(
+            [(message["role"], message["content"]) for message in normalized["messages"]],
+            [("user", "给我看看系统架构"), ("assistant", "## TinyAI Observability — 系统架构")],
+        )
+        self.assertNotIn("ide_opened_file", normalized["messages"][0]["content"])
+        self.assertFalse(any("I need to understand the system architecture" in message["content"] for message in normalized["messages"]))
+
     def test_turn_snapshot_derives_code_changes_from_apply_patch_tool_call(self):
         patch = """*** Begin Patch
 *** Update File: /Users/user/code/ai-observability/collector-server/tests/hello.py

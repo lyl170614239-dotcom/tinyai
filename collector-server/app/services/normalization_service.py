@@ -35,6 +35,10 @@ SPEC_COMMAND_FILE_RE = re.compile(
     r"(?:file://)?(?:/[^\s\"'`<>\]\)]+/)?openspec/specs/[^\s\"'`<>\]\);|]+?\.[A-Za-z0-9]+",
     re.IGNORECASE,
 )
+CLAUDE_CONTEXT_BLOCK_RE = re.compile(
+    r"<(ide_opened_file|selected_text|selection|system-reminder|system_reminder)[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _iso(value: datetime) -> str:
@@ -74,6 +78,59 @@ def _normalize_role(role: Any) -> str:
     if text in {"ai", "agent"}:
         return "assistant"
     return "message"
+
+
+def _strip_claude_context_blocks(text: str) -> str:
+    cleaned = CLAUDE_CONTEXT_BLOCK_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _prompt_text_from_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("prompt", "text", "content"):
+            nested = value.get(key)
+            if isinstance(nested, str):
+                return nested
+        return ""
+    return ""
+
+
+def _claude_agent_prompt_candidates(payload: dict[str, Any]) -> list[str]:
+    prompts: list[str] = []
+    raw_tools = payload.get("tool_calls")
+    if not isinstance(raw_tools, list):
+        return prompts
+    for tool in raw_tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_name = str(tool.get("tool_name") or tool.get("name") or "").lower()
+        if tool_name != "agent":
+            continue
+        for key in ("arguments_raw", "arguments", "input", "args"):
+            raw_value = tool.get(key)
+            raw_args = _json_record(raw_value)
+            prompt = _prompt_text_from_value(raw_args) or _prompt_text_from_value(raw_value)
+            if prompt.strip():
+                prompts.append(prompt)
+    return prompts
+
+
+def _looks_like_claude_agent_prompt(text: str, payload: dict[str, Any]) -> bool:
+    normalized = " ".join(text.split()).lower()
+    if not normalized:
+        return False
+    for prompt in _claude_agent_prompt_candidates(payload):
+        candidate = " ".join(prompt.split()).lower()
+        if candidate and (normalized == candidate or normalized in candidate or candidate in normalized):
+            return True
+    if normalized.startswith("i need to ") and "please do a thorough exploration" in normalized:
+        return True
+    if normalized.startswith("i need to understand ") and ("project" in normalized or "codebase" in normalized):
+        return True
+    return False
 
 
 def _normalize_step_type(value: Any) -> str:
@@ -552,6 +609,7 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
     raw_messages = payload.get("messages")
     if not isinstance(raw_messages, list):
         return []
+    is_claude_turn_snapshot = event.tool == "claude" and event.event_type == "turn_snapshot"
     messages: list[dict[str, Any]] = []
     positions_by_source: dict[str, int] = {}
     current_turn_index = 0
@@ -563,6 +621,13 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
         if not content.strip() and text_len == 0:
             continue
         role = _normalize_role(raw.get("role"))
+        if is_claude_turn_snapshot and role == "user":
+            content = _strip_claude_context_blocks(content)
+            if not content.strip():
+                continue
+            if _looks_like_claude_agent_prompt(content, payload):
+                continue
+            text_len = len(content)
         explicit_turn_index = _safe_int(raw.get("turn_index") if raw.get("turn_index") is not None else raw.get("turn"))
         if explicit_turn_index and explicit_turn_index > 0:
             current_turn_index = explicit_turn_index
@@ -582,7 +647,7 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
             "response_id": str(raw.get("response_id") or raw.get("responseId") or "")[:256] or None,
             "role": role,
             "content": content,
-            "content_hash": text_hash,
+            "content_hash": _hash_text(content) if is_claude_turn_snapshot and role == "user" else text_hash,
             "text_len": text_len,
             "occurred_at": occurred_at,
             "raw_path": f"$.messages[{index}]",
@@ -1164,6 +1229,14 @@ def _normalize_turn_snapshot(event: EventIn, payload: dict[str, Any]) -> dict[st
         warnings.append("turn_snapshot missing request_id")
     if not response_id:
         warnings.append("turn_snapshot missing response_id")
+    session_title = payload.get("title")
+    if event.tool == "claude":
+        first_user_message = next((message.get("content") for message in messages if message.get("role") == "user" and message.get("content")), None)
+        if isinstance(first_user_message, str) and first_user_message.strip():
+            session_title = first_user_message.strip()
+        elif isinstance(session_title, str):
+            cleaned_title = _strip_claude_context_blocks(session_title)
+            session_title = None if _looks_like_claude_agent_prompt(cleaned_title, payload) else cleaned_title or None
     return {
         "schema_version": NORMALIZED_SCHEMA_VERSION,
         "tool": event.tool,
@@ -1178,7 +1251,7 @@ def _normalize_turn_snapshot(event: EventIn, payload: dict[str, Any]) -> dict[st
             "started_at": started_at,
             "last_activity_at": completed_at,
             "status": "completed" if turn_status == "completed" else turn_status,
-            "title": payload.get("title"),
+            "title": session_title,
             "model": payload.get("resolved_model") or payload.get("model") or event.model,
         },
         "turns": [

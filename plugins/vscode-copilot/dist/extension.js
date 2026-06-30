@@ -2753,7 +2753,7 @@ async function migrateLegacyCollectorUrl() {
     await settings.update("collectorUrl", DEFAULT_COLLECTOR_URL, vscode.ConfigurationTarget.Global);
   }
 }
-var PLUGIN_VERSION = "0.1.39";
+var PLUGIN_VERSION = "0.1.40";
 function pluginNameForTool(tool) {
   if (tool === "claude") return "tinyai-observability-claude";
   if (tool === "codex") return "tinyai-observability-codex";

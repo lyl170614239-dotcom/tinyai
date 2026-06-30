@@ -214,3 +214,108 @@ test("Claude turn parser keeps multiple real prompts in one session", async () =
   assert.deepEqual(snapshots.map((item) => item.user_message.text), ["你好", "继续修改"]);
   assert.deepEqual(snapshots.map((item) => item.assistant_message?.text), ["你好！有什么我可以帮你的吗？", "好的，我继续。"]);
 });
+
+test("Claude turn parser keeps Agent prompt as tool evidence instead of a user message", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-agent-prompt-"));
+  const sessionFile = join(dir, "claude-session.jsonl");
+  await writeFile(sessionFile, [
+    {
+      type: "user",
+      uuid: "real-user-request",
+      promptId: "prompt-architecture",
+      sessionId: "claude-agent-session",
+      timestamp: "2026-06-30T04:16:23.397Z",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<ide_opened_file>The user opened the file /Users/user/code/ai-observability/scripts/clear_tinyobs_data.py in the IDE. This may or may not be related to the current task.</ide_opened_file>"
+          },
+          {
+            type: "text",
+            text: "给我看看系统架构"
+          }
+        ]
+      }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-agent-call",
+      sessionId: "claude-agent-session",
+      timestamp: "2026-06-30T04:16:28.000Z",
+      message: {
+        id: "assistant-agent-call",
+        role: "assistant",
+        model: "claude-opus-4-8",
+        stop_reason: "tool_use",
+        content: [
+          { type: "text", text: "Let me explore the project structure to understand the architecture." },
+          {
+            type: "tool_use",
+            id: "call-agent-architecture",
+            name: "agent",
+            input: {
+              prompt: [
+                "I need to understand the system architecture of the ai-observability project at /Users/user/code/ai-observability.",
+                "",
+                "Please do a thorough exploration:"
+              ].join("\n")
+            }
+          }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "agent-tool-result",
+      promptId: "prompt-architecture",
+      sessionId: "claude-agent-session",
+      timestamp: "2026-06-30T04:16:32.000Z",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call-agent-architecture",
+            content: "API Error: 400 The supported API model names are deepseek-v4-pro or deepseek-v4-flash, but you passed DeepSeek-V3.2.",
+            is_error: true
+          }
+        ]
+      },
+      toolUseResult: {
+        status: "failed",
+        prompt: "I need to understand the system architecture of the ai-observability project at /Users/user/code/ai-observability.",
+        agentId: "agent-architecture"
+      }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-final",
+      sessionId: "claude-agent-session",
+      timestamp: "2026-06-30T04:17:08.000Z",
+      message: {
+        id: "assistant-final",
+        role: "assistant",
+        model: "claude-opus-4-8",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "## TinyAI Observability — 系统架构" }]
+      }
+    }
+  ].map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-agent-session"
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].user_message.text, "给我看看系统架构");
+  assert.deepEqual(snapshots[0].messages.filter((message) => message.role === "user").map((message) => message.text), ["给我看看系统架构"]);
+  assert.equal(snapshots[0].tool_calls[0].tool_name, "agent");
+  assert.match(String(snapshots[0].tool_calls[0].arguments_raw?.prompt || ""), /system architecture/);
+  assert.ok(!snapshots[0].messages.some((message) => message.text.includes("I need to understand the system architecture")));
+  assert.ok(!snapshots[0].messages.some((message) => message.text.includes("ide_opened_file")));
+});
