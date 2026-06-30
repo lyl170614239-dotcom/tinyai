@@ -215,6 +215,127 @@ test("Claude turn parser keeps multiple real prompts in one session", async () =
   assert.deepEqual(snapshots.map((item) => item.assistant_message?.text), ["你好！有什么我可以帮你的吗？", "好的，我继续。"]);
 });
 
+test("Claude turn parser preserves global turn indexes for incremental segments", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-incremental-index-"));
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-one",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:00:00.000Z",
+      promptSource: "sdk",
+      message: { role: "user", content: [{ type: "text", text: "第一轮" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-one",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:00:05.000Z",
+      message: {
+        id: "msg-assistant-one",
+        role: "assistant",
+        model: "claude-opus-4-6",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "第一轮回复" }]
+      }
+    },
+    {
+      type: "user",
+      uuid: "skill-injected-instructions",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:00:06.000Z",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Base directory for this skill: /tmp/skills/install-tinyai-observability\n\n# Install TinyAI Observability"
+          }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "request-two",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:01:00.000Z",
+      promptSource: "sdk",
+      message: { role: "user", content: [{ type: "text", text: "第二轮" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-two",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:01:05.000Z",
+      message: {
+        id: "msg-assistant-two",
+        role: "assistant",
+        model: "claude-opus-4-6",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "第二轮回复" }]
+      }
+    },
+    {
+      type: "user",
+      uuid: "request-three",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:02:00.000Z",
+      promptSource: "sdk",
+      message: { role: "user", content: [{ type: "text", text: "sa 阿斯顿发" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-three",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:02:05.000Z",
+      message: {
+        id: "msg-assistant-three",
+        role: "assistant",
+        model: "claude-opus-4-6",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "第三轮回复" }]
+      }
+    },
+    {
+      type: "user",
+      uuid: "request-four",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:03:00.000Z",
+      promptSource: "sdk",
+      message: { role: "user", content: [{ type: "text", text: "的飒风" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-four",
+      sessionId: "claude-incremental-index-session",
+      timestamp: "2026-06-30T08:03:05.000Z",
+      message: {
+        id: "msg-assistant-four",
+        role: "assistant",
+        model: "claude-opus-4-6",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "第四轮回复" }]
+      }
+    }
+  ];
+  const lines = entries.map((item) => JSON.stringify(item));
+  await writeFile(sessionFile, `${lines.join("\n")}\n`, "utf8");
+  const startOffset = Buffer.byteLength(`${lines.slice(0, 5).join("\n")}\n`, "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-incremental-index-session",
+    startOffset
+  });
+
+  assert.deepEqual(snapshots.map((item) => item.user_message.text), ["sa 阿斯顿发", "的飒风"]);
+  assert.deepEqual(snapshots.map((item) => item.turn_index), [3, 4]);
+  assert.deepEqual(snapshots.map((item) => item.request_usage[0].request_index), [2, 3]);
+});
+
 test("Claude turn parser keeps Agent prompt as tool evidence instead of a user message", async () => {
   const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-agent-prompt-"));
   const sessionFile = join(dir, "claude-session.jsonl");

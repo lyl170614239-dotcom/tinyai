@@ -284,7 +284,28 @@ function isRealUserPrompt(entry: JsonRecord): boolean {
   const text = textFromClaudeContent(content, { excludeToolBlocks: true, excludeSystemReminder: true, excludeContext: true }).trim();
   if (!text) return false;
   if (/^\[Request interrupted by user/i.test(text)) return false;
+  if (/^Base directory for this skill:/i.test(text)) return false;
   return true;
+}
+
+async function countPriorClaudeUserTurns(filePath: string, startOffset: number, requestedSessionId?: string): Promise<number> {
+  if (startOffset <= 0) return 0;
+  const raw = await readFile(filePath);
+  const prefix = raw.subarray(0, Math.min(startOffset, raw.length)).toString("utf8");
+  let count = 0;
+  for (const line of prefix.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let entry: JsonRecord;
+    try {
+      entry = JSON.parse(line) as JsonRecord;
+    } catch {
+      continue;
+    }
+    const sessionId = cleanString(entry.sessionId) || cleanString(entry.session_id) || basename(filePath, ".jsonl");
+    if (requestedSessionId && sessionId !== requestedSessionId) continue;
+    if (isRealUserPrompt(entry)) count += 1;
+  }
+  return count;
 }
 
 function textFromClaudeContent(content: unknown, options: { excludeToolBlocks?: boolean; excludeSystemReminder?: boolean; excludeContext?: boolean; excludeThinking?: boolean } = {}): string {
@@ -785,8 +806,8 @@ export async function captureLatestClaudeTurnSnapshots(
 
   const turns: ClaudeTurnSnapshot[] = [];
   let current: WorkingTurn | undefined;
-  let turnIndex = 0;
   const requestedSessionId = options.sessionId;
+  let turnIndex = await countPriorClaudeUserTurns(filePath, segment.startOffset, requestedSessionId);
 
   function finishCurrent() {
     if (!current) return;

@@ -699,7 +699,32 @@ function isRealUserPrompt(entry) {
     return false;
   if (/^\[Request interrupted by user/i.test(text))
     return false;
+  if (/^Base directory for this skill:/i.test(text))
+    return false;
   return true;
+}
+async function countPriorClaudeUserTurns(filePath, startOffset, requestedSessionId) {
+  if (startOffset <= 0)
+    return 0;
+  const raw = await readFile2(filePath);
+  const prefix = raw.subarray(0, Math.min(startOffset, raw.length)).toString("utf8");
+  let count = 0;
+  for (const line of prefix.split(/\r?\n/)) {
+    if (!line.trim())
+      continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const sessionId = cleanString(entry.sessionId) || cleanString(entry.session_id) || basename(filePath, ".jsonl");
+    if (requestedSessionId && sessionId !== requestedSessionId)
+      continue;
+    if (isRealUserPrompt(entry))
+      count += 1;
+  }
+  return count;
 }
 function textFromClaudeContent(content, options = {}) {
   if (typeof content === "string") {
@@ -1154,8 +1179,8 @@ async function captureLatestClaudeTurnSnapshots(options = {}) {
   }
   const turns = [];
   let current;
-  let turnIndex = 0;
   const requestedSessionId = options.sessionId;
+  let turnIndex = await countPriorClaudeUserTurns(filePath, segment.startOffset, requestedSessionId);
   function finishCurrent() {
     if (!current)
       return;
