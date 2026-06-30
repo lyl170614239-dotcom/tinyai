@@ -485,38 +485,44 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(self.db.execute(select(RawIngestEvent)).scalars().all(), [])
 
     def test_install_smoke_heartbeat_does_not_register_plugin_client(self):
-        event = EventIn(
-            event_id="codex-smoke-123456",
-            task_id="codex-install-smoke",
-            tool="codex",
-            event_type="plugin_heartbeat",
-            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
-            payload={"smoke_test": True, "source": "install-tinyai-observability"},
-            source_confidence="direct",
-            username="杨辉",
-            user_id="杨辉",
-            user_display_name="杨辉",
-            machine_id="machine-1",
-        )
-        batch = BatchIn(
-            client_id="codex-install-smoke-machine-1",
-            plugin_name="tinyai-observability-codex",
-            plugin_version="0.1.4+codex.20260630205023",
-            username="杨辉",
-            user_id="杨辉",
-            user_display_name="杨辉",
-            machine_id="machine-1",
-            events=[event],
-        )
+        cases = [
+            ("codex", "codex-smoke-123456", "0.1.4+codex.20260630205023"),
+            ("claude", "claude-smoke-123456", "0.1.8"),
+        ]
+        for tool, event_id, version in cases:
+            with self.subTest(tool=tool):
+                event = EventIn(
+                    event_id=event_id,
+                    task_id=f"{tool}-install-smoke",
+                    tool=tool,
+                    event_type="plugin_heartbeat",
+                    occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+                    payload={"smoke_test": True, "source": "install-tinyai-observability"},
+                    source_confidence="direct",
+                    username="杨辉",
+                    user_id="杨辉",
+                    user_display_name="杨辉",
+                    machine_id=f"{tool}-machine-1",
+                )
+                batch = BatchIn(
+                    client_id=f"{tool}-install-smoke-machine-1",
+                    plugin_name=f"tinyai-observability-{tool}",
+                    plugin_version=version,
+                    username="杨辉",
+                    user_id="杨辉",
+                    user_display_name="杨辉",
+                    machine_id=f"{tool}-machine-1",
+                    events=[event],
+                )
 
-        result = ingest_batch(self.db, batch)
+                result = ingest_batch(self.db, batch)
 
-        self.assertEqual(result["accepted"], 1)
-        self.assertEqual(self.db.execute(select(PluginClient)).scalars().all(), [])
-        heartbeat = self.db.execute(select(PluginHeartbeat)).scalars().one()
-        self.assertEqual(heartbeat.event_id, "codex-smoke-123456")
-        self.assertEqual(heartbeat.plugin_version, "0.1.4+codex.20260630205023")
-        self.assertEqual(self.db.execute(select(RawIngestEvent)).scalars().all(), [])
+                self.assertEqual(result["accepted"], 1)
+                self.assertEqual(self.db.execute(select(PluginClient)).scalars().all(), [])
+                heartbeat = self.db.get(PluginHeartbeat, event_id)
+                self.assertIsNotNone(heartbeat)
+                self.assertEqual(heartbeat.plugin_version, version)
+                self.assertEqual(self.db.execute(select(RawIngestEvent)).scalars().all(), [])
 
     def test_turn_snapshot_is_queued_then_worker_normalizes_product_tables(self):
         event = EventIn(
