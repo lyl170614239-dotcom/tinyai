@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { cwd } from "node:process";
+import { buildClaudeBashDeltaPayload, captureClaudeBashSnapshot, readClaudeBashSnapshot, writeClaudeBashSnapshot } from "./claude-bash-delta.js";
 import { captureLatestClaudeTurnSnapshots } from "./claude-turn.js";
 import { claudeWorkspaceDiffPathCandidates, hasClaudeExternalWriteSignal } from "./claude-workspace-fallback.js";
 import { CollectorClient } from "./client.js";
@@ -22,9 +23,11 @@ async function readStdin() {
 const workspacePath = process.env.TINYAI_OBS_WORKSPACE || cwd();
 loadTinyAiEnvFile(workspacePath);
 const tool = (process.env.TINYAI_OBS_TOOL || "claude");
-const eventType = (process.env.TINYAI_OBS_EVENT_TYPE || process.argv[2] || "plugin_heartbeat");
+const rawEventType = process.env.TINYAI_OBS_EVENT_TYPE || process.argv[2] || "plugin_heartbeat";
+const eventType = rawEventType;
 const requireAiMarker = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_REQUIRE_AI_MARKER || "").toLowerCase());
 const skipUnmarkedCommits = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_SKIP_UNMARKED_COMMITS || "").toLowerCase());
+const enableClaudeWorkspaceDiffFallback = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_ENABLE_CLAUDE_WORKSPACE_DIFF_FALLBACK || "").toLowerCase());
 const outputTokens = process.env.TINYAI_OBS_OUTPUT_TOKENS
     ? parseInt(process.env.TINYAI_OBS_OUTPUT_TOKENS, 10) || undefined
     : undefined;
@@ -48,7 +51,7 @@ const hookSessionFile = hookPayload.transcript_path ||
     hookPayload.session_file ||
     hookPayload.sessionFile;
 const payload = raw ? { hook_payload_present: true, hook_payload_bytes: Buffer.byteLength(raw) } : {};
-const events = eventType === "commit_snapshot" || eventType === "push_snapshot"
+const events = eventType === "commit_snapshot" || eventType === "push_snapshot" || rawEventType === "bash_pre_tool_use" || rawEventType === "bash_post_tool_use"
     ? []
     : [makeEvent({ tool, eventType, taskId: hookTaskId, sessionId: hookSessionId, workspacePath, payload, sourceConfidence: "derived" })];
 const afterSuccessfulUpload = [];
@@ -111,8 +114,64 @@ async function commitClaudeTurnCursor(filePath, nextOffset, sessionId) {
 function objectRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
+function hookToolName() {
+    return String(hookPayload.tool_name || hookPayload.toolName || hookPayload.tool || hookPayload.name || "").toLowerCase();
+}
+function hookToolInput() {
+    return objectRecord(hookPayload.tool_input) || objectRecord(hookPayload.toolInput) || objectRecord(hookPayload.input) || {};
+}
+function hookToolCallId() {
+    const value = hookPayload.tool_use_id || hookPayload.toolUseID || hookPayload.tool_call_id || hookPayload.toolCallId;
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function hookCommand() {
+    const input = hookToolInput();
+    const value = input.command || hookPayload.command;
+    return typeof value === "string" && value.trim() ? value : undefined;
+}
+function claudeBashSnapshotPath(toolCallId, command) {
+    const key = stableEventId(`${hookSessionId || "unknown"}:${toolCallId || ""}:${command || ""}`);
+    return join(process.env.TINYAI_OBS_BASH_DELTA_DIR || join(homedir(), ".tinyai-observability", "bash-delta"), `${key}.json`);
+}
 if (eventType === "task_start" && tool === "claude" && typeof hookSessionFile === "string") {
     await startOffsetForClaudeTurnFile(hookSessionFile, hookSessionId);
+}
+if (rawEventType === "bash_pre_tool_use" && tool === "claude" && /bash|shell|terminal/.test(hookToolName())) {
+    const command = hookCommand();
+    if (command) {
+        const toolCallId = hookToolCallId();
+        const snapshot = await captureClaudeBashSnapshot(workspacePath, { command, toolCallId });
+        await writeClaudeBashSnapshot(claudeBashSnapshotPath(toolCallId, command), snapshot);
+    }
+}
+if (rawEventType === "bash_post_tool_use" && tool === "claude" && /bash|shell|terminal/.test(hookToolName())) {
+    const command = hookCommand();
+    if (command) {
+        const toolCallId = hookToolCallId();
+        const snapshotPath = claudeBashSnapshotPath(toolCallId, command);
+        const before = await readClaudeBashSnapshot(snapshotPath);
+        if (before) {
+            await rm(snapshotPath, { force: true });
+            const delta = await buildClaudeBashDeltaPayload(workspacePath, before, {
+                command,
+                sessionId: hookSessionId,
+                toolCallId,
+                occurredAt: new Date().toISOString()
+            });
+            if (delta) {
+                events.push(makeEvent({
+                    tool: "claude",
+                    eventType: "code_change",
+                    taskId: hookTaskId || hookSessionId || `claude-bash-${delta.command_hash || Date.now()}`,
+                    sessionId: hookSessionId,
+                    workspacePath,
+                    payload: delta,
+                    sourceConfidence: "derived",
+                    eventId: stableEventId(`claude:bash_delta:${workspacePath}:${hookSessionId || ""}:${toolCallId || ""}:${delta.command_hash}:${delta.after_captured_at}`)
+                }));
+            }
+        }
+    }
 }
 async function appendClaudeWorkspaceDiffFallbackEvents(snapshot, options) {
     if (!hasClaudeExternalWriteSignal(snapshot))
@@ -245,13 +304,15 @@ if (eventType === "turn_snapshot" && tool === "claude") {
                 eventId,
                 model: snapshot.resolved_model || snapshot.model
             }));
-            await appendClaudeWorkspaceDiffFallbackEvents(snapshot, {
-                eventId,
-                taskId: hookTaskId || snapshot.request_id,
-                sessionId: snapshot.session_id,
-                workspacePath: snapshot.cwd || workspacePath,
-                captureText
-            });
+            if (enableClaudeWorkspaceDiffFallback) {
+                await appendClaudeWorkspaceDiffFallbackEvents(snapshot, {
+                    eventId,
+                    taskId: hookTaskId || snapshot.request_id,
+                    sessionId: snapshot.session_id,
+                    workspacePath: snapshot.cwd || workspacePath,
+                    captureText
+                });
+            }
             if (sessionFile && Number.isFinite(nextOffset) && nextOffset >= 0) {
                 afterSuccessfulUpload.push(() => commitClaudeTurnCursor(sessionFile, nextOffset, snapshot.session_id));
             }

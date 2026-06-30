@@ -241,10 +241,9 @@ async function migrateLegacyCollectorUrl() {
   }
 }
 
-const PLUGIN_VERSION = "0.1.41";
+const PLUGIN_VERSION = "0.1.42";
 
 function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
-  if (tool === "claude") return "tinyai-observability-claude";
   if (tool === "codex") return "tinyai-observability-codex";
   return "tinyai-observability-vscode";
 }

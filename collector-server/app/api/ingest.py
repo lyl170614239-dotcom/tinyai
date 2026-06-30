@@ -119,6 +119,40 @@ def _tool_rows(rows: list[tuple]) -> dict[str, dict]:
     return result
 
 
+def _version_list(versions: object) -> list[str]:
+    return [version for version in str(versions or "").split(",") if version]
+
+
+def _plugin_source_buckets(rows: list[tuple], *, heartbeat: bool = False) -> dict[str, dict[str, dict]]:
+    result: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        tool = str(row[0] or "unknown")
+        plugin_name = str(row[1] or "unknown")
+        source = result.setdefault(tool, {}).setdefault(
+            plugin_name,
+            {
+                "plugin_name": plugin_name,
+                "registered_clients": 0,
+                "active_clients": 0,
+                "heartbeat_count": 0,
+                "versions": [],
+                "latest_at": None,
+                "_latest_raw": None,
+            },
+        )
+        if heartbeat:
+            _, _, count, latest_at, versions = row
+            source["heartbeat_count"] = int(count or 0)
+        else:
+            _, _, count, active_count, latest_at, versions = row
+            source["registered_clients"] = int(count or 0)
+            source["active_clients"] = int(active_count or 0)
+        source["versions"] = sorted(set(source["versions"] + _version_list(versions)))
+        source["_latest_raw"] = _latest_datetime(source["_latest_raw"], latest_at)
+        source["latest_at"] = _beijing_iso(source["_latest_raw"]) if source["_latest_raw"] else None
+    return result
+
+
 def _check_status(active_clients: int, sessions: int, count: int, required_when_session: bool = False) -> str:
     if count > 0:
         return "ok"
@@ -144,6 +178,17 @@ def runtime_status(db: Session = Depends(get_db)) -> dict:
         )
         .group_by(PluginClient.tool)
     ).all()
+    client_source_rows = db.execute(
+        select(
+            PluginClient.tool,
+            PluginClient.plugin_name,
+            func.count(PluginClient.client_id),
+            func.sum(case((PluginClient.last_seen_at >= active_since, 1), else_=0)),
+            func.max(PluginClient.last_seen_at),
+            func.group_concat(func.distinct(PluginClient.plugin_version)),
+        )
+        .group_by(PluginClient.tool, PluginClient.plugin_name)
+    ).all()
     heartbeat_rows = db.execute(
         select(
             PluginHeartbeat.tool,
@@ -152,6 +197,16 @@ def runtime_status(db: Session = Depends(get_db)) -> dict:
             func.group_concat(func.distinct(PluginHeartbeat.plugin_version)),
         )
         .group_by(PluginHeartbeat.tool)
+    ).all()
+    heartbeat_source_rows = db.execute(
+        select(
+            PluginHeartbeat.tool,
+            PluginHeartbeat.plugin_name,
+            func.count(PluginHeartbeat.event_id),
+            func.max(PluginHeartbeat.occurred_at),
+            func.group_concat(func.distinct(PluginHeartbeat.plugin_version)),
+        )
+        .group_by(PluginHeartbeat.tool, PluginHeartbeat.plugin_name)
     ).all()
     session_rows = _tool_rows(db.execute(
         select(AiSession.tool, func.count(AiSession.session_id), func.max(AiSession.last_activity_at))
@@ -193,7 +248,7 @@ def runtime_status(db: Session = Depends(get_db)) -> dict:
             "active_clients": int(active_count or 0),
             "latest_at": _beijing_iso(latest_at) if latest_at else None,
             "_latest_raw": latest_at,
-            "versions": [version for version in str(versions or "").split(",") if version],
+            "versions": _version_list(versions),
         }
 
     heartbeats_by_tool: dict[str, dict] = {}
@@ -202,8 +257,20 @@ def runtime_status(db: Session = Depends(get_db)) -> dict:
             "heartbeat_count": int(count or 0),
             "latest_at": _beijing_iso(latest_at) if latest_at else None,
             "_latest_raw": latest_at,
-            "versions": [version for version in str(versions or "").split(",") if version],
+            "versions": _version_list(versions),
         }
+    plugin_sources_by_tool = _plugin_source_buckets(client_source_rows)
+    heartbeat_sources_by_tool = _plugin_source_buckets(heartbeat_source_rows, heartbeat=True)
+    for tool, source_map in heartbeat_sources_by_tool.items():
+        target_map = plugin_sources_by_tool.setdefault(tool, {})
+        for plugin_name, heartbeat_source in source_map.items():
+            target = target_map.setdefault(plugin_name, heartbeat_source)
+            if target is heartbeat_source:
+                continue
+            target["heartbeat_count"] = heartbeat_source["heartbeat_count"]
+            target["versions"] = sorted(set(target["versions"] + heartbeat_source["versions"]))
+            target["_latest_raw"] = _latest_datetime(target["_latest_raw"], heartbeat_source["_latest_raw"])
+            target["latest_at"] = _beijing_iso(target["_latest_raw"]) if target["_latest_raw"] else None
 
     preferred_tools = ["copilot", "claude", "codex"]
     observed_tools = sorted(
@@ -266,6 +333,14 @@ def runtime_status(db: Session = Depends(get_db)) -> dict:
             "status": overall,
             "latest_activity_at": _beijing_iso(latest_raw) if latest_raw else None,
             "versions": sorted(set(client["versions"] + heartbeat["versions"])),
+            "plugin_sources": sorted(
+                [
+                    {key: value for key, value in source.items() if key != "_latest_raw"}
+                    for source in plugin_sources_by_tool.get(tool, {}).values()
+                ],
+                key=lambda source: str(source.get("latest_at") or ""),
+                reverse=True,
+            ),
             "registered_clients": int(client["registered_clients"]),
             "active_clients": active_clients,
             "heartbeat_count": int(heartbeat["heartbeat_count"]),
