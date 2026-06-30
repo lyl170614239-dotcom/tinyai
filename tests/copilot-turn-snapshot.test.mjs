@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildCopilotTurnSnapshotsFromReplayState,
   buildCopilotTurnSnapshots,
+  copilotReplayOffsets,
+  replayCopilotChatSessionState,
   copilotTurnEventId,
   CollectorClient
 } from "../plugin-runtime/dist/index.js";
@@ -132,6 +135,115 @@ test("replays chatSessions kind 2 array replacements by index", () => {
   assert.equal(snapshots[1].turn_index, 2);
   assert.equal(snapshots[1].user_message.text, "继续写代码，写一个分子计算的");
   assert.equal(snapshots[1].assistant_message.text, "已添加分子量计算函数");
+});
+
+test("replays Copilot chatSessions from start and keeps transcript attribution complete", () => {
+  assert.deepEqual(
+    copilotReplayOffsets({
+      includeHistory: false,
+      replayInitializedAtEof: false,
+      chatReadOffset: 19117,
+      transcriptReadOffset: 314
+    }),
+    {
+      chatReadOffset: 0,
+      transcriptReadOffset: 0
+    }
+  );
+  assert.deepEqual(
+    copilotReplayOffsets({
+      includeHistory: false,
+      replayInitializedAtEof: true,
+      chatReadOffset: 19117,
+      transcriptReadOffset: 314
+    }),
+    {
+      chatReadOffset: 0,
+      transcriptReadOffset: 0
+    }
+  );
+});
+
+test("builds identical snapshots from checkpointed Copilot chat journal replay", () => {
+  const entries = [
+    {
+      kind: 0,
+      v: {
+        sessionId: "session-checkpoint",
+        creationDate: "2026-06-24T10:00:00.000Z",
+        requests: [
+          {
+            requestId: "request-1",
+            timestamp: "2026-06-24T10:00:01.000Z",
+            message: { text: "第一轮" },
+            response: [{ kind: "text", value: "第一轮回答" }],
+            modelState: { value: 1, completedAt: "2026-06-24T10:00:02.000Z", responseId: "response-1" },
+            result: { metadata: { resolvedModel: "claude-haiku-4.5" }, details: "Claude Haiku 4.5 • 1.1 credits" }
+          }
+        ]
+      }
+    },
+    {
+      kind: 2,
+      k: ["requests"],
+      i: 1,
+      v: [
+        {
+          requestId: "request-2",
+          timestamp: "2026-06-24T10:00:03.000Z",
+          message: { text: "第二轮" },
+          response: [],
+          modelState: { value: 0 }
+        }
+      ]
+    },
+    {
+      kind: 2,
+      k: ["requests", 1, "response"],
+      v: [{ kind: "text", value: "第二轮回答" }]
+    },
+    {
+      kind: 1,
+      k: ["requests", 1, "result"],
+      v: {
+        metadata: { resolvedModel: "claude-haiku-4.5", promptTokens: 20, outputTokens: 4 },
+        timings: { totalElapsed: 2000 },
+        details: "Claude Haiku 4.5 • 2.2 credits"
+      }
+    },
+    {
+      kind: 1,
+      k: ["requests", 1, "modelState"],
+      v: { value: 1, completedAt: "2026-06-24T10:00:05.000Z", responseId: "response-2" }
+    }
+  ];
+
+  const fullState = replayCopilotChatSessionState(entries);
+  const checkpoint = replayCopilotChatSessionState(entries.slice(0, 2));
+  const incrementalState = replayCopilotChatSessionState(entries.slice(2), checkpoint);
+  const fullSnapshots = buildCopilotTurnSnapshotsFromReplayState({ replay_state: fullState });
+  const incrementalSnapshots = buildCopilotTurnSnapshotsFromReplayState({ replay_state: incrementalState });
+
+  assert.deepEqual(
+    incrementalSnapshots.map((snapshot) => ({
+      turn_index: snapshot.turn_index,
+      request_id: snapshot.request_id,
+      response_id: snapshot.response_id,
+      user: snapshot.user_message.text,
+      assistant: snapshot.assistant_message.text,
+      model: snapshot.model,
+      credits: snapshot.usage_totals.copilot_credits
+    })),
+    fullSnapshots.map((snapshot) => ({
+      turn_index: snapshot.turn_index,
+      request_id: snapshot.request_id,
+      response_id: snapshot.response_id,
+      user: snapshot.user_message.text,
+      assistant: snapshot.assistant_message.text,
+      model: snapshot.model,
+      credits: snapshot.usage_totals.copilot_credits
+    }))
+  );
 });
 
 test("turn_snapshot upload path keeps secrets and blobifies large tool raw content", () => {

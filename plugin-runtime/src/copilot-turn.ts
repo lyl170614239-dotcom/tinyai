@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { parseCopilotRequestUsage, type RequestUsage, type UsageTotals } from "./copilot-usage.js";
+import {
+  parsedCopilotUsageFromState,
+  replayCopilotRequestUsageState,
+  type CopilotUsageReplayState,
+  type RequestUsage,
+  type UsageTotals
+} from "./copilot-usage.js";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -126,7 +132,30 @@ export type CopilotTurnSnapshot = {
   };
 };
 
-export const COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.1";
+export type CopilotChatReplayState = {
+  chat_state?: JsonRecord;
+  usage_state: CopilotUsageReplayState;
+};
+
+export const COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.2";
+
+export function copilotReplayOffsets(options: {
+  includeHistory?: boolean;
+  replayInitializedAtEof?: boolean;
+  chatReadOffset?: number;
+  transcriptReadOffset?: number;
+}): { chatReadOffset: number; transcriptReadOffset: number } {
+  const replayAll = Boolean(options.includeHistory || options.replayInitializedAtEof);
+  return {
+    // VS Code chatSessions are journal/patch files. Later entries often depend
+    // on the initial kind:0 state, so byte-offset replay can miss new turns.
+    chatReadOffset: 0,
+    // Keep transcript replay complete for tool/progress attribution. Transcript
+    // entries can contribute process state to older turns while chatSessions
+    // checkpoint replay rebuilds every turn snapshot.
+    transcriptReadOffset: 0
+  };
+}
 
 function record(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : undefined;
@@ -238,8 +267,12 @@ function requestIdFromRequest(request: JsonRecord, index: number, sessionId: str
   return cleanString(request.requestId) || cleanString(request.id) || cleanString(request.request_id) || `${sessionId}:request:${index}`;
 }
 
+function cloneJsonRecord(value: JsonRecord | undefined): JsonRecord | undefined {
+  return value ? JSON.parse(JSON.stringify(value)) as JsonRecord : undefined;
+}
+
 function applyJournalEntry(root: JsonRecord | undefined, entry: JsonRecord): JsonRecord | undefined {
-  if (entry.kind === 0) return record(entry.v) || root;
+  if (entry.kind === 0) return cloneJsonRecord(record(entry.v)) || root;
   if (!root) return root;
   const path = Array.isArray(entry.k) ? entry.k : [];
   if (!path.length) return root;
@@ -251,7 +284,10 @@ function applyJournalEntry(root: JsonRecord | undefined, entry: JsonRecord): Jso
   const last = path[path.length - 1] as any;
   if (entry.kind === 2) {
     const existing = Array.isArray(cursor[last]) ? cursor[last] : [];
-    const values = Array.isArray(entry.v) ? entry.v : [entry.v];
+    const values = (Array.isArray(entry.v) ? entry.v : [entry.v]).map((value) => {
+      if (!value || typeof value !== "object") return value;
+      return JSON.parse(JSON.stringify(value));
+    });
     const replaceAt = typeof entry.i === "number" && Number.isInteger(entry.i) ? entry.i : undefined;
     if (replaceAt === undefined) {
       cursor[last] = existing.concat(values);
@@ -266,7 +302,16 @@ function applyJournalEntry(root: JsonRecord | undefined, entry: JsonRecord): Jso
   return root;
 }
 
-export function replayCopilotChatSession(entries: JsonRecord[]): {
+export function replayCopilotChatSessionState(entries: JsonRecord[], base?: CopilotChatReplayState): CopilotChatReplayState {
+  let snapshot = cloneJsonRecord(base?.chat_state);
+  for (const entry of entries) snapshot = applyJournalEntry(snapshot, entry);
+  return {
+    chat_state: snapshot,
+    usage_state: replayCopilotRequestUsageState(entries, base?.usage_state)
+  };
+}
+
+export function replayCopilotChatSessionFromState(replayState: CopilotChatReplayState): {
   session_id?: string;
   title?: string;
   started_at?: string;
@@ -274,9 +319,8 @@ export function replayCopilotChatSession(entries: JsonRecord[]): {
   usage_totals: UsageTotals;
   resolved_model?: string;
 } {
-  let snapshot: JsonRecord | undefined;
-  for (const entry of entries) snapshot = applyJournalEntry(snapshot, entry);
-  const usage = parseCopilotRequestUsage(entries);
+  const snapshot = replayState.chat_state;
+  const usage = parsedCopilotUsageFromState(replayState.usage_state);
   const sessionId = cleanString(snapshot?.sessionId) || usage.sessionId || "copilot-session";
   const title = cleanString(snapshot?.customTitle) || usage.title;
   const startedAt = isoTimestamp(snapshot?.creationDate) || usage.startedAt;
@@ -320,6 +364,17 @@ export function replayCopilotChatSession(entries: JsonRecord[]): {
     usage_totals: usage.usageTotals,
     resolved_model: usage.resolvedModel
   };
+}
+
+export function replayCopilotChatSession(entries: JsonRecord[]): {
+  session_id?: string;
+  title?: string;
+  started_at?: string;
+  turns: CopilotChatTurn[];
+  usage_totals: UsageTotals;
+  resolved_model?: string;
+} {
+  return replayCopilotChatSessionFromState(replayCopilotChatSessionState(entries));
 }
 
 function eventTime(entry: JsonRecord, data: JsonRecord): string | undefined {
@@ -505,7 +560,21 @@ export function buildCopilotTurnSnapshots(input: {
   chat_file?: SourceFileInfo;
   transcript_file?: SourceFileInfo;
 }): CopilotTurnSnapshot[] {
-  const chat = replayCopilotChatSession(input.chat_entries);
+  return buildCopilotTurnSnapshotsFromReplayState({
+    replay_state: replayCopilotChatSessionState(input.chat_entries),
+    transcript_entries: input.transcript_entries,
+    chat_file: input.chat_file,
+    transcript_file: input.transcript_file
+  });
+}
+
+export function buildCopilotTurnSnapshotsFromReplayState(input: {
+  replay_state: CopilotChatReplayState;
+  transcript_entries?: JsonRecord[];
+  chat_file?: SourceFileInfo;
+  transcript_file?: SourceFileInfo;
+}): CopilotTurnSnapshot[] {
+  const chat = replayCopilotChatSessionFromState(input.replay_state);
   const transcript = input.transcript_entries ? parseCopilotTranscriptEvents(input.transcript_entries) : undefined;
   const usageByRequest = new Map((chat.turns || []).map((turn) => [turn.request_id, turn.usage]));
 

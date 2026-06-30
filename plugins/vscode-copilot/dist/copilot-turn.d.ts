@@ -1,4 +1,4 @@
-import { type RequestUsage, type UsageTotals } from "./copilot-usage.js";
+import { type CopilotUsageReplayState, type RequestUsage, type UsageTotals } from "./copilot-usage.js";
 export type JsonRecord = Record<string, unknown>;
 export type SourceFileInfo = {
     path?: string;
@@ -116,7 +116,29 @@ export type CopilotTurnSnapshot = {
         capture_limitations: string;
     };
 };
-export declare const COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.1";
+export type CopilotChatReplayState = {
+    chat_state?: JsonRecord;
+    usage_state: CopilotUsageReplayState;
+};
+export declare const COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.2";
+export declare function copilotReplayOffsets(options: {
+    includeHistory?: boolean;
+    replayInitializedAtEof?: boolean;
+    chatReadOffset?: number;
+    transcriptReadOffset?: number;
+}): {
+    chatReadOffset: number;
+    transcriptReadOffset: number;
+};
+export declare function replayCopilotChatSessionState(entries: JsonRecord[], base?: CopilotChatReplayState): CopilotChatReplayState;
+export declare function replayCopilotChatSessionFromState(replayState: CopilotChatReplayState): {
+    session_id?: string;
+    title?: string;
+    started_at?: string;
+    turns: CopilotChatTurn[];
+    usage_totals: UsageTotals;
+    resolved_model?: string;
+};
 export declare function replayCopilotChatSession(entries: JsonRecord[]): {
     session_id?: string;
     title?: string;
@@ -128,6 +150,12 @@ export declare function replayCopilotChatSession(entries: JsonRecord[]): {
 export declare function parseCopilotTranscriptEvents(entries: JsonRecord[]): CopilotTranscriptData;
 export declare function buildCopilotTurnSnapshots(input: {
     chat_entries: JsonRecord[];
+    transcript_entries?: JsonRecord[];
+    chat_file?: SourceFileInfo;
+    transcript_file?: SourceFileInfo;
+}): CopilotTurnSnapshot[];
+export declare function buildCopilotTurnSnapshotsFromReplayState(input: {
+    replay_state: CopilotChatReplayState;
     transcript_entries?: JsonRecord[];
     chat_file?: SourceFileInfo;
     transcript_file?: SourceFileInfo;

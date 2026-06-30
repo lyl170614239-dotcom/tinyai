@@ -1,6 +1,18 @@
 import { createHash } from "node:crypto";
-import { parseCopilotRequestUsage } from "./copilot-usage.js";
-export const COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.1";
+import { parsedCopilotUsageFromState, replayCopilotRequestUsageState } from "./copilot-usage.js";
+export const COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.2";
+export function copilotReplayOffsets(options) {
+    const replayAll = Boolean(options.includeHistory || options.replayInitializedAtEof);
+    return {
+        // VS Code chatSessions are journal/patch files. Later entries often depend
+        // on the initial kind:0 state, so byte-offset replay can miss new turns.
+        chatReadOffset: 0,
+        // Keep transcript replay complete for tool/progress attribution. Transcript
+        // entries can contribute process state to older turns while chatSessions
+        // checkpoint replay rebuilds every turn snapshot.
+        transcriptReadOffset: 0
+    };
+}
 function record(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
@@ -105,9 +117,12 @@ function responseIdFromRequest(request, requestId, finalAnswer, completedAt) {
 function requestIdFromRequest(request, index, sessionId) {
     return cleanString(request.requestId) || cleanString(request.id) || cleanString(request.request_id) || `${sessionId}:request:${index}`;
 }
+function cloneJsonRecord(value) {
+    return value ? JSON.parse(JSON.stringify(value)) : undefined;
+}
 function applyJournalEntry(root, entry) {
     if (entry.kind === 0)
-        return record(entry.v) || root;
+        return cloneJsonRecord(record(entry.v)) || root;
     if (!root)
         return root;
     const path = Array.isArray(entry.k) ? entry.k : [];
@@ -122,7 +137,11 @@ function applyJournalEntry(root, entry) {
     const last = path[path.length - 1];
     if (entry.kind === 2) {
         const existing = Array.isArray(cursor[last]) ? cursor[last] : [];
-        const values = Array.isArray(entry.v) ? entry.v : [entry.v];
+        const values = (Array.isArray(entry.v) ? entry.v : [entry.v]).map((value) => {
+            if (!value || typeof value !== "object")
+                return value;
+            return JSON.parse(JSON.stringify(value));
+        });
         const replaceAt = typeof entry.i === "number" && Number.isInteger(entry.i) ? entry.i : undefined;
         if (replaceAt === undefined) {
             cursor[last] = existing.concat(values);
@@ -138,11 +157,18 @@ function applyJournalEntry(root, entry) {
     }
     return root;
 }
-export function replayCopilotChatSession(entries) {
-    let snapshot;
+export function replayCopilotChatSessionState(entries, base) {
+    let snapshot = cloneJsonRecord(base?.chat_state);
     for (const entry of entries)
         snapshot = applyJournalEntry(snapshot, entry);
-    const usage = parseCopilotRequestUsage(entries);
+    return {
+        chat_state: snapshot,
+        usage_state: replayCopilotRequestUsageState(entries, base?.usage_state)
+    };
+}
+export function replayCopilotChatSessionFromState(replayState) {
+    const snapshot = replayState.chat_state;
+    const usage = parsedCopilotUsageFromState(replayState.usage_state);
     const sessionId = cleanString(snapshot?.sessionId) || usage.sessionId || "copilot-session";
     const title = cleanString(snapshot?.customTitle) || usage.title;
     const startedAt = isoTimestamp(snapshot?.creationDate) || usage.startedAt;
@@ -186,6 +212,9 @@ export function replayCopilotChatSession(entries) {
         usage_totals: usage.usageTotals,
         resolved_model: usage.resolvedModel
     };
+}
+export function replayCopilotChatSession(entries) {
+    return replayCopilotChatSessionFromState(replayCopilotChatSessionState(entries));
 }
 function eventTime(entry, data) {
     return isoTimestamp(entry.timestamp || entry.time || data.timestamp || data.startTime || data.completedAt || data.createdAt);
@@ -349,7 +378,15 @@ function inTurnWindow(value, turn) {
     return candidate >= start - 2_000 && candidate <= end + 2_000;
 }
 export function buildCopilotTurnSnapshots(input) {
-    const chat = replayCopilotChatSession(input.chat_entries);
+    return buildCopilotTurnSnapshotsFromReplayState({
+        replay_state: replayCopilotChatSessionState(input.chat_entries),
+        transcript_entries: input.transcript_entries,
+        chat_file: input.chat_file,
+        transcript_file: input.transcript_file
+    });
+}
+export function buildCopilotTurnSnapshotsFromReplayState(input) {
+    const chat = replayCopilotChatSessionFromState(input.replay_state);
     const transcript = input.transcript_entries ? parseCopilotTranscriptEvents(input.transcript_entries) : undefined;
     const usageByRequest = new Map((chat.turns || []).map((turn) => [turn.request_id, turn.usage]));
     return chat.turns.map((turn) => {

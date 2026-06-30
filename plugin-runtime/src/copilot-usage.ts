@@ -31,6 +31,14 @@ export type ParsedCopilotUsage = {
   requestCount: number;
 };
 
+export type CopilotUsageReplayState = {
+  sessionId?: string;
+  title?: string;
+  startedAt?: string;
+  nextRequestIndex: number;
+  requestUsage: RequestUsage[];
+};
+
 type JsonRecord = Record<string, unknown>;
 
 function record(value: unknown): JsonRecord | undefined {
@@ -121,12 +129,14 @@ function applyRequest(target: RequestUsage, request: JsonRecord) {
   applyResult(target, request.result);
 }
 
-export function parseCopilotRequestUsage(entries: JsonRecord[]): ParsedCopilotUsage {
-  let sessionId: string | undefined;
-  let title: string | undefined;
-  let startedAt: string | undefined;
-  let nextRequestIndex = 0;
-  const usages = new Map<number, RequestUsage>();
+export function replayCopilotRequestUsageState(entries: JsonRecord[], base?: CopilotUsageReplayState): CopilotUsageReplayState {
+  let sessionId = base?.sessionId;
+  let title = base?.title;
+  let startedAt = base?.startedAt;
+  let nextRequestIndex = base?.nextRequestIndex ?? 0;
+  const usages = new Map<number, RequestUsage>(
+    (base?.requestUsage || []).map((usage) => [usage.request_index, { ...usage }])
+  );
 
   const usageAt = (index: number) => {
     let usage = usages.get(index);
@@ -168,7 +178,8 @@ export function parseCopilotRequestUsage(entries: JsonRecord[]): ParsedCopilotUs
       continue;
     }
     if (kind === 2 && path.length === 1 && path[0] === "requests" && Array.isArray(entry.v)) {
-      for (const request of entry.v) registerRequest(request, nextRequestIndex);
+      const startIndex = typeof entry.i === "number" && Number.isInteger(entry.i) ? entry.i : nextRequestIndex;
+      entry.v.forEach((request, offset) => registerRequest(request, startIndex + offset));
       continue;
     }
     if (path.length < 3 || path[0] !== "requests" || typeof path[1] !== "number") continue;
@@ -206,7 +217,17 @@ export function parseCopilotRequestUsage(entries: JsonRecord[]): ParsedCopilotUs
     }
   }
 
-  const requestUsage = [...usages.values()].sort((left, right) => left.request_index - right.request_index);
+  return {
+    sessionId,
+    title,
+    startedAt,
+    nextRequestIndex,
+    requestUsage: [...usages.values()].sort((left, right) => left.request_index - right.request_index)
+  };
+}
+
+export function parsedCopilotUsageFromState(state: CopilotUsageReplayState): ParsedCopilotUsage {
+  const requestUsage = [...state.requestUsage].sort((left, right) => left.request_index - right.request_index);
   const usageTotals = requestUsage.reduce<UsageTotals>(
     (totals, usage) => ({
       prompt_tokens: totals.prompt_tokens + (usage.prompt_tokens ?? 0),
@@ -219,12 +240,16 @@ export function parseCopilotRequestUsage(entries: JsonRecord[]): ParsedCopilotUs
   );
   const resolvedModel = [...requestUsage].reverse().find((usage) => usage.model)?.model;
   return {
-    sessionId,
-    title,
-    startedAt,
+    sessionId: state.sessionId,
+    title: state.title,
+    startedAt: state.startedAt,
     resolvedModel,
     requestUsage,
     usageTotals,
     requestCount: requestUsage.length
   };
+}
+
+export function parseCopilotRequestUsage(entries: JsonRecord[]): ParsedCopilotUsage {
+  return parsedCopilotUsageFromState(replayCopilotRequestUsageState(entries));
 }

@@ -1,6 +1,6 @@
-# TinyAI Observability IDEA Plugin
+# TinyAI Observability JetBrains Plugin
 
-JetBrains IDEA plugin shell for TinyAI Observability.
+JetBrains plugin shell for TinyAI Observability.
 
 Target IDE: IntelliJ Platform 2025.2+.
 

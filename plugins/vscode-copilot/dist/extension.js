@@ -2,7 +2,7 @@
 import * as vscode from "vscode";
 import { execFileSync } from "node:child_process";
 import { createHash as createHash6, randomUUID as randomUUID2 } from "node:crypto";
-import { open as open2, readdir as readdir3, readFile as readFile5, stat as stat3 } from "node:fs/promises";
+import { mkdir as mkdir3, open as open2, readdir as readdir3, readFile as readFile5, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir3, hostname } from "node:os";
 import { basename as basename2, dirname as dirname3, join as join5 } from "node:path";
 
@@ -1377,12 +1377,12 @@ function applyRequest(target, request) {
   }
   applyResult(target, request.result);
 }
-function parseCopilotRequestUsage(entries) {
-  let sessionId;
-  let title;
-  let startedAt;
-  let nextRequestIndex = 0;
-  const usages = /* @__PURE__ */ new Map();
+function replayCopilotRequestUsageState(entries, base) {
+  let sessionId = base?.sessionId;
+  let title = base?.title;
+  let startedAt = base?.startedAt;
+  let nextRequestIndex = base?.nextRequestIndex ?? 0;
+  const usages = new Map((base?.requestUsage || []).map((usage) => [usage.request_index, { ...usage }]));
   const usageAt = (index) => {
     let usage = usages.get(index);
     if (!usage) {
@@ -1424,8 +1424,8 @@ function parseCopilotRequestUsage(entries) {
       continue;
     }
     if (kind === 2 && path.length === 1 && path[0] === "requests" && Array.isArray(entry.v)) {
-      for (const request of entry.v)
-        registerRequest(request, nextRequestIndex);
+      const startIndex = typeof entry.i === "number" && Number.isInteger(entry.i) ? entry.i : nextRequestIndex;
+      entry.v.forEach((request, offset) => registerRequest(request, startIndex + offset));
       continue;
     }
     if (path.length < 3 || path[0] !== "requests" || typeof path[1] !== "number")
@@ -1464,7 +1464,16 @@ function parseCopilotRequestUsage(entries) {
       }
     }
   }
-  const requestUsage = [...usages.values()].sort((left, right) => left.request_index - right.request_index);
+  return {
+    sessionId,
+    title,
+    startedAt,
+    nextRequestIndex,
+    requestUsage: [...usages.values()].sort((left, right) => left.request_index - right.request_index)
+  };
+}
+function parsedCopilotUsageFromState(state) {
+  const requestUsage = [...state.requestUsage].sort((left, right) => left.request_index - right.request_index);
   const usageTotals = requestUsage.reduce((totals, usage) => ({
     prompt_tokens: totals.prompt_tokens + (usage.prompt_tokens ?? 0),
     output_tokens: totals.output_tokens + (usage.output_tokens ?? 0),
@@ -1474,9 +1483,9 @@ function parseCopilotRequestUsage(entries) {
   }), { prompt_tokens: 0, output_tokens: 0, completion_tokens: 0, elapsed_ms: 0, copilot_credits: 0 });
   const resolvedModel = [...requestUsage].reverse().find((usage) => usage.model)?.model;
   return {
-    sessionId,
-    title,
-    startedAt,
+    sessionId: state.sessionId,
+    title: state.title,
+    startedAt: state.startedAt,
     resolvedModel,
     requestUsage,
     usageTotals,
@@ -1485,7 +1494,19 @@ function parseCopilotRequestUsage(entries) {
 }
 
 // ../../plugin-runtime/dist/copilot-turn.js
-var COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.1";
+var COPILOT_TURN_PARSER_VERSION = "copilot-turn-v1.0.2";
+function copilotReplayOffsets(options) {
+  const replayAll = Boolean(options.includeHistory || options.replayInitializedAtEof);
+  return {
+    // VS Code chatSessions are journal/patch files. Later entries often depend
+    // on the initial kind:0 state, so byte-offset replay can miss new turns.
+    chatReadOffset: 0,
+    // Keep transcript replay complete for tool/progress attribution. Transcript
+    // entries can contribute process state to older turns while chatSessions
+    // checkpoint replay rebuilds every turn snapshot.
+    transcriptReadOffset: 0
+  };
+}
 function record3(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
 }
@@ -1583,9 +1604,12 @@ function responseIdFromRequest(request, requestId2, finalAnswer, completedAt) {
 function requestIdFromRequest(request, index, sessionId) {
   return cleanString2(request.requestId) || cleanString2(request.id) || cleanString2(request.request_id) || `${sessionId}:request:${index}`;
 }
+function cloneJsonRecord(value) {
+  return value ? JSON.parse(JSON.stringify(value)) : void 0;
+}
 function applyJournalEntry(root, entry) {
   if (entry.kind === 0)
-    return record3(entry.v) || root;
+    return cloneJsonRecord(record3(entry.v)) || root;
   if (!root)
     return root;
   const path = Array.isArray(entry.k) ? entry.k : [];
@@ -1600,7 +1624,11 @@ function applyJournalEntry(root, entry) {
   const last = path[path.length - 1];
   if (entry.kind === 2) {
     const existing = Array.isArray(cursor[last]) ? cursor[last] : [];
-    const values = Array.isArray(entry.v) ? entry.v : [entry.v];
+    const values = (Array.isArray(entry.v) ? entry.v : [entry.v]).map((value) => {
+      if (!value || typeof value !== "object")
+        return value;
+      return JSON.parse(JSON.stringify(value));
+    });
     const replaceAt = typeof entry.i === "number" && Number.isInteger(entry.i) ? entry.i : void 0;
     if (replaceAt === void 0) {
       cursor[last] = existing.concat(values);
@@ -1614,11 +1642,18 @@ function applyJournalEntry(root, entry) {
   }
   return root;
 }
-function replayCopilotChatSession(entries) {
-  let snapshot;
+function replayCopilotChatSessionState(entries, base) {
+  let snapshot = cloneJsonRecord(base?.chat_state);
   for (const entry of entries)
     snapshot = applyJournalEntry(snapshot, entry);
-  const usage = parseCopilotRequestUsage(entries);
+  return {
+    chat_state: snapshot,
+    usage_state: replayCopilotRequestUsageState(entries, base?.usage_state)
+  };
+}
+function replayCopilotChatSessionFromState(replayState) {
+  const snapshot = replayState.chat_state;
+  const usage = parsedCopilotUsageFromState(replayState.usage_state);
   const sessionId = cleanString2(snapshot?.sessionId) || usage.sessionId || "copilot-session";
   const title = cleanString2(snapshot?.customTitle) || usage.title;
   const startedAt = isoTimestamp3(snapshot?.creationDate) || usage.startedAt;
@@ -1824,8 +1859,8 @@ function inTurnWindow(value, turn) {
     return true;
   return candidate >= start - 2e3 && candidate <= end + 2e3;
 }
-function buildCopilotTurnSnapshots(input) {
-  const chat2 = replayCopilotChatSession(input.chat_entries);
+function buildCopilotTurnSnapshotsFromReplayState(input) {
+  const chat2 = replayCopilotChatSessionFromState(input.replay_state);
   const transcript = input.transcript_entries ? parseCopilotTranscriptEvents(input.transcript_entries) : void 0;
   const usageByRequest = new Map((chat2.turns || []).map((turn) => [turn.request_id, turn.usage]));
   return chat2.turns.map((turn) => {
@@ -2778,7 +2813,7 @@ async function migrateLegacyCollectorUrl() {
     await settings.update("collectorUrl", DEFAULT_COLLECTOR_URL, vscode.ConfigurationTarget.Global);
   }
 }
-var PLUGIN_VERSION = "0.1.43";
+var PLUGIN_VERSION = "0.1.46";
 function pluginNameForTool(tool) {
   if (tool === "codex") return "tinyai-observability-codex";
   return "tinyai-observability-vscode";
@@ -2863,6 +2898,9 @@ async function ensureTask(trigger) {
 }
 function hashText3(text) {
   return createHash6("sha256").update(text).digest("hex").slice(0, 32);
+}
+function fullHashText(text) {
+  return createHash6("sha256").update(text).digest("hex");
 }
 function currentCollectorHash() {
   return hashText3(config().collectorUrl.replace(/\/$/, ""));
@@ -3910,6 +3948,64 @@ async function sourceFileInfo(path, mtimeMs, size, content, readOffset = 0) {
     hash_scope: content || size <= TRANSCRIPT_FULL_READ_MAX_BYTES ? "full_file_or_segment" : "metadata"
   };
 }
+function copilotCheckpointDir() {
+  const root = extensionContext?.globalStorageUri?.fsPath;
+  return root ? join5(root, "copilot-checkpoints") : void 0;
+}
+function copilotCheckpointPath(sessionKey) {
+  const dir = copilotCheckpointDir();
+  return dir ? join5(dir, `${hashText3(sessionKey)}.json`) : void 0;
+}
+function checkpointHash(checkpoint) {
+  return fullHashText(JSON.stringify({
+    schema_version: checkpoint.schema_version,
+    parser_version: checkpoint.parser_version,
+    session_id: checkpoint.session_id,
+    chat_read_offset: checkpoint.chat_read_offset,
+    chat_size: checkpoint.chat_size,
+    chat_fingerprint: checkpoint.chat_fingerprint,
+    replay_state: checkpoint.replay_state
+  }));
+}
+async function readCopilotCheckpoint(sessionKey, cursor, chat2, chatFingerprint) {
+  const path = cursor?.checkpoint_path || copilotCheckpointPath(sessionKey);
+  if (!path || !cursor?.checkpoint_hash) return void 0;
+  if (cursor.checkpoint_parser_version !== COPILOT_TURN_PARSER_VERSION) return void 0;
+  if (chat2.size < (cursor.chat_read_offset || 0)) return void 0;
+  try {
+    const parsed = JSON.parse(await readFile5(path, "utf8"));
+    if (parsed.schema_version !== "copilot.checkpoint.v1") return void 0;
+    if (parsed.parser_version !== COPILOT_TURN_PARSER_VERSION) return void 0;
+    if (parsed.session_id !== sessionKey) return void 0;
+    if (parsed.chat_read_offset !== cursor.chat_read_offset) return void 0;
+    if (chat2.size < parsed.chat_read_offset) return void 0;
+    if (checkpointHash(parsed) !== cursor.checkpoint_hash) return void 0;
+    if (parsed.chat_fingerprint && chatFingerprint && parsed.chat_fingerprint === chatFingerprint) return parsed;
+    return parsed;
+  } catch {
+    return void 0;
+  }
+}
+async function writeCopilotCheckpoint(sessionKey, chat2, chatReadOffset, chatFingerprint, replayState) {
+  const path = copilotCheckpointPath(sessionKey);
+  const dir = copilotCheckpointDir();
+  if (!path || !dir) return {};
+  const checkpoint = {
+    schema_version: "copilot.checkpoint.v1",
+    parser_version: COPILOT_TURN_PARSER_VERSION,
+    session_id: sessionKey,
+    chat_read_offset: chatReadOffset,
+    chat_size: chat2.size,
+    chat_mtime_ms: chat2.mtimeMs,
+    chat_fingerprint: chatFingerprint,
+    replay_state: replayState,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const hash = checkpointHash(checkpoint);
+  await mkdir3(dir, { recursive: true });
+  await writeFile3(path, JSON.stringify(checkpoint), "utf8");
+  return { path, hash };
+}
 async function captureCopilotLocalTranscripts(options = {}) {
   const context = extensionContext;
   if (!context) {
@@ -3968,14 +4064,24 @@ async function captureCopilotLocalTranscripts(options = {}) {
       continue;
     }
     try {
-      const chatReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.chat_read_offset || 0;
-      const transcriptReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.transcript_read_offset || 0;
+      const checkpoint = !options.includeHistory && !replayInitializedAtEof ? await readCopilotCheckpoint(sessionKey, cursor, chat2, chatFingerprint) : void 0;
+      const replayFromCheckpoint = Boolean(checkpoint);
+      const { chatReadOffset, transcriptReadOffset } = checkpoint ? {
+        chatReadOffset: checkpoint.chat_read_offset,
+        transcriptReadOffset: 0
+      } : copilotReplayOffsets({
+        includeHistory: options.includeHistory,
+        replayInitializedAtEof,
+        chatReadOffset: cursor?.chat_read_offset,
+        transcriptReadOffset: cursor?.transcript_read_offset
+      });
       const chatRead = await readJsonlRecords(chat2.path, chatReadOffset);
       const transcriptRead = transcript ? await readJsonlRecords(transcript.path, transcriptReadOffset) : void 0;
       const chatEntries = chatRead.records;
       const transcriptEntries = transcriptRead?.records;
-      const snapshots = buildCopilotTurnSnapshots({
-        chat_entries: chatEntries,
+      const replayState = replayCopilotChatSessionState(chatEntries, checkpoint?.replay_state);
+      const snapshots = buildCopilotTurnSnapshotsFromReplayState({
+        replay_state: replayState,
         transcript_entries: transcriptEntries,
         chat_file: await sourceFileInfo(chat2.path, chat2.mtimeMs, chat2.size, void 0, chatReadOffset),
         transcript_file: transcript ? await sourceFileInfo(transcript.path, transcript.mtimeMs, transcript.size, void 0, transcriptReadOffset) : void 0
@@ -4021,13 +4127,18 @@ async function captureCopilotLocalTranscripts(options = {}) {
         uploaded += 1;
         capturedMessages += 2;
       }
+      const savedCheckpoint = await writeCopilotCheckpoint(sessionKey, chat2, chatRead.nextOffset, chatFingerprint, replayState);
       cursors[sessionKey] = {
         chat_fingerprint: chatFingerprint,
         transcript_fingerprint: transcriptFingerprint,
         chat_read_offset: chatRead.nextOffset,
         transcript_read_offset: transcriptRead?.nextOffset,
+        checkpoint_path: savedCheckpoint.path,
+        checkpoint_hash: savedCheckpoint.hash,
+        checkpoint_parser_version: COPILOT_TURN_PARSER_VERSION,
         initialized_at_eof: false,
-        processed_at: (/* @__PURE__ */ new Date()).toISOString()
+        processed_at: (/* @__PURE__ */ new Date()).toISOString(),
+        ...replayFromCheckpoint ? { replay_mode: "checkpoint" } : {}
       };
       cursorChanged = true;
     } catch (error) {

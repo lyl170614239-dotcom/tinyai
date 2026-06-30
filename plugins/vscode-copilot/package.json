@@ -2,7 +2,7 @@
   "name": "tinyai-observability-copilot",
   "displayName": "TinyAI Observability",
   "description": "Native VS Code extension for Copilot/Claude TinyAI coding telemetry.",
-  "version": "0.1.43",
+  "version": "0.1.46",
   "publisher": "tinyai",
   "private": true,
   "type": "module",

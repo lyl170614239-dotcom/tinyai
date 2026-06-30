@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { open, readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -15,17 +15,21 @@ import {
   installGitHooks,
   markAiActivity,
   makeEvent,
-  buildCopilotTurnSnapshots,
+  buildCopilotTurnSnapshotsFromReplayState,
+  COPILOT_TURN_PARSER_VERSION,
+  copilotReplayOffsets,
   copilotTurnEventId,
   copilotTurnSignature,
   pushSnapshot,
   recordAiLineSnapshot,
   redactText,
+  replayCopilotChatSessionState,
   searchSpecs,
   stableEventId,
   type ObservabilityEvent,
   type BatchUploadResult,
   type ClaudeTurnSnapshot,
+  type CopilotChatReplayState,
   type CopilotTurnSnapshot,
   DEFAULT_COLLECTOR_URL,
   DEFAULT_DASHBOARD_URL,
@@ -186,10 +190,25 @@ type CopilotSessionCursor = {
   transcript_fingerprint?: string;
   chat_read_offset?: number;
   transcript_read_offset?: number;
+  checkpoint_path?: string;
+  checkpoint_hash?: string;
+  checkpoint_parser_version?: string;
+  replay_mode?: "full" | "checkpoint";
   initialized_at_eof?: boolean;
   processed_at: string;
 };
 type CopilotSessionCursorStore = Record<string, CopilotSessionCursor>;
+type CopilotCheckpointFile = {
+  schema_version: "copilot.checkpoint.v1";
+  parser_version: string;
+  session_id: string;
+  chat_read_offset: number;
+  chat_size: number;
+  chat_mtime_ms: number;
+  chat_fingerprint?: string;
+  replay_state: CopilotChatReplayState;
+  updated_at: string;
+};
 const pendingTurnStateKeysByEventId = new Map<string, string>();
 const LEGACY_DEFAULT_COLLECTOR_URLS = new Set([
   "http://192.168.215.94:18080",
@@ -241,7 +260,7 @@ async function migrateLegacyCollectorUrl() {
   }
 }
 
-const PLUGIN_VERSION = "0.1.43";
+const PLUGIN_VERSION = "0.1.46";
 
 function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
   if (tool === "codex") return "tinyai-observability-codex";
@@ -1734,6 +1753,80 @@ async function sourceFileInfo(path: string, mtimeMs: number, size: number, conte
   };
 }
 
+function copilotCheckpointDir(): string | undefined {
+  const root = extensionContext?.globalStorageUri?.fsPath;
+  return root ? join(root, "copilot-checkpoints") : undefined;
+}
+
+function copilotCheckpointPath(sessionKey: string): string | undefined {
+  const dir = copilotCheckpointDir();
+  return dir ? join(dir, `${hashText(sessionKey)}.json`) : undefined;
+}
+
+function checkpointHash(checkpoint: CopilotCheckpointFile): string {
+  return fullHashText(JSON.stringify({
+    schema_version: checkpoint.schema_version,
+    parser_version: checkpoint.parser_version,
+    session_id: checkpoint.session_id,
+    chat_read_offset: checkpoint.chat_read_offset,
+    chat_size: checkpoint.chat_size,
+    chat_fingerprint: checkpoint.chat_fingerprint,
+    replay_state: checkpoint.replay_state
+  }));
+}
+
+async function readCopilotCheckpoint(
+  sessionKey: string,
+  cursor: CopilotSessionCursor | undefined,
+  chat: { mtimeMs: number; size: number },
+  chatFingerprint: string | undefined
+): Promise<CopilotCheckpointFile | undefined> {
+  const path = cursor?.checkpoint_path || copilotCheckpointPath(sessionKey);
+  if (!path || !cursor?.checkpoint_hash) return undefined;
+  if (cursor.checkpoint_parser_version !== COPILOT_TURN_PARSER_VERSION) return undefined;
+  if (chat.size < (cursor.chat_read_offset || 0)) return undefined;
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as CopilotCheckpointFile;
+    if (parsed.schema_version !== "copilot.checkpoint.v1") return undefined;
+    if (parsed.parser_version !== COPILOT_TURN_PARSER_VERSION) return undefined;
+    if (parsed.session_id !== sessionKey) return undefined;
+    if (parsed.chat_read_offset !== cursor.chat_read_offset) return undefined;
+    if (chat.size < parsed.chat_read_offset) return undefined;
+    if (checkpointHash(parsed) !== cursor.checkpoint_hash) return undefined;
+    if (parsed.chat_fingerprint && chatFingerprint && parsed.chat_fingerprint === chatFingerprint) return parsed;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeCopilotCheckpoint(
+  sessionKey: string,
+  chat: { mtimeMs: number; size: number },
+  chatReadOffset: number,
+  chatFingerprint: string | undefined,
+  replayState: CopilotChatReplayState
+): Promise<{ path?: string; hash?: string }> {
+  const path = copilotCheckpointPath(sessionKey);
+  const dir = copilotCheckpointDir();
+  if (!path || !dir) return {};
+  const checkpoint: CopilotCheckpointFile = {
+    schema_version: "copilot.checkpoint.v1",
+    parser_version: COPILOT_TURN_PARSER_VERSION,
+    session_id: sessionKey,
+    chat_read_offset: chatReadOffset,
+    chat_size: chat.size,
+    chat_mtime_ms: chat.mtimeMs,
+    chat_fingerprint: chatFingerprint,
+    replay_state: replayState,
+    updated_at: new Date().toISOString()
+  };
+  const hash = checkpointHash(checkpoint);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path, JSON.stringify(checkpoint), "utf8");
+  return { path, hash };
+}
+
 function textFromUnknown(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(textFromUnknown).filter(Boolean).join("\n");
@@ -2200,14 +2293,28 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
       continue;
     }
     try {
-      const chatReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.chat_read_offset || 0;
-      const transcriptReadOffset = options.includeHistory || replayInitializedAtEof ? 0 : cursor?.transcript_read_offset || 0;
+      const checkpoint = !options.includeHistory && !replayInitializedAtEof
+        ? await readCopilotCheckpoint(sessionKey, cursor, chat, chatFingerprint)
+        : undefined;
+      const replayFromCheckpoint = Boolean(checkpoint);
+      const { chatReadOffset, transcriptReadOffset } = checkpoint
+        ? {
+            chatReadOffset: checkpoint.chat_read_offset,
+            transcriptReadOffset: 0
+          }
+        : copilotReplayOffsets({
+            includeHistory: options.includeHistory,
+            replayInitializedAtEof,
+            chatReadOffset: cursor?.chat_read_offset,
+            transcriptReadOffset: cursor?.transcript_read_offset
+          });
       const chatRead = await readJsonlRecords(chat.path, chatReadOffset);
       const transcriptRead = transcript ? await readJsonlRecords(transcript.path, transcriptReadOffset) : undefined;
       const chatEntries = chatRead.records;
       const transcriptEntries = transcriptRead?.records;
-      const snapshots = buildCopilotTurnSnapshots({
-        chat_entries: chatEntries,
+      const replayState = replayCopilotChatSessionState(chatEntries, checkpoint?.replay_state);
+      const snapshots = buildCopilotTurnSnapshotsFromReplayState({
+        replay_state: replayState,
         transcript_entries: transcriptEntries,
         chat_file: await sourceFileInfo(chat.path, chat.mtimeMs, chat.size, undefined, chatReadOffset),
         transcript_file: transcript ? await sourceFileInfo(transcript.path, transcript.mtimeMs, transcript.size, undefined, transcriptReadOffset) : undefined
@@ -2253,13 +2360,18 @@ async function captureCopilotLocalTranscripts(options: { silent?: boolean; inclu
         uploaded += 1;
         capturedMessages += 2;
       }
+      const savedCheckpoint = await writeCopilotCheckpoint(sessionKey, chat, chatRead.nextOffset, chatFingerprint, replayState);
       cursors[sessionKey] = {
         chat_fingerprint: chatFingerprint,
         transcript_fingerprint: transcriptFingerprint,
         chat_read_offset: chatRead.nextOffset,
         transcript_read_offset: transcriptRead?.nextOffset,
+        checkpoint_path: savedCheckpoint.path,
+        checkpoint_hash: savedCheckpoint.hash,
+        checkpoint_parser_version: COPILOT_TURN_PARSER_VERSION,
         initialized_at_eof: false,
-        processed_at: new Date().toISOString()
+        processed_at: new Date().toISOString(),
+        ...(replayFromCheckpoint ? { replay_mode: "checkpoint" } : {})
       };
       cursorChanged = true;
     } catch (error) {
