@@ -19,23 +19,26 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 Run these commands:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user --sparse .claude-plugin plugins/claude-code
-claude plugin install observability@tinyai --scope user
-claude plugin list
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace update tinyai
+claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
-If this Claude Code version does not support `--sparse`, retry the marketplace
-add without it:
+If the `tinyai` marketplace already exists but points to an old local checkout
+or stale cache, refresh the source first:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --scope user
-claude plugin install observability@tinyai --scope user
-claude plugin list
+claude plugin marketplace remove tinyai
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace update tinyai
+claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
 ## Identity setup after install
 
-After `claude plugin list` confirms `observability@tinyai` is enabled, configure
+After `claude plugin install observability@tinyai` succeeds, configure
 the identity before telling the user installation is complete. Write both the
 generic TinyAI identity and the Claude-specific identity. Claude and Codex are
 separate plugins; use `TINYAI_OBS_CLAUDE_*` keys here, not
@@ -212,13 +215,13 @@ echo "TinyAI Claude smoke test passed: collector accepted plugin_heartbeat."
 
 ```bash
 claude plugin marketplace update tinyai
-claude plugin update observability@tinyai
-claude plugin list
+claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
 ## Verify
 
-1. `claude plugin list` should show `observability@tinyai` enabled.
+1. `claude plugin marketplace list` should show the `tinyai` marketplace.
 2. The env file should contain both `TINYAI_OBS_USER_NAME` and
    `TINYAI_OBS_CLAUDE_USER_NAME`.
 3. The collector smoke test should pass and create a `tool=claude`
