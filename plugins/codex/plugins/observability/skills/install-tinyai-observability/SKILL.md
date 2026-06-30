@@ -167,7 +167,9 @@ If the email is unknown, omit both `TINYAI_OBS_USER_EMAIL` and
 the smoke test fails.
 
 5. Ask the user to restart Codex or open a new Codex session so the plugin MCP
-process reloads the env file.
+process reloads the env file. The smoke test only proves that the collector can
+accept data; real conversation capture starts after the Codex MCP server is
+loaded in a fresh session.
 
 ## Collector smoke test after install
 
@@ -191,6 +193,30 @@ if ! curl -fsS "$HEALTH_URL" >/tmp/tinyai-codex-health.json; then
   exit 1
 fi
 
+PLUGIN_VERSION="${TINYAI_OBS_PLUGIN_VERSION:-}"
+if [ -z "$PLUGIN_VERSION" ]; then
+  PLUGIN_VERSION="$(python3 - <<'PY'
+from pathlib import Path
+import json
+
+root = Path.home() / ".codex" / "plugins" / "cache" / "tinyai" / "observability"
+candidates = []
+for manifest in root.glob("*/.codex-plugin/plugin.json"):
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    version = str(data.get("version") or manifest.parent.name)
+    runtime = manifest.parent / "runtime" / "dist" / "mcp-server.js"
+    if runtime.exists():
+        candidates.append((manifest.parent.stat().st_mtime, version))
+
+print(sorted(candidates)[-1][1] if candidates else "")
+PY
+)"
+fi
+export TINYAI_OBS_PLUGIN_VERSION="${PLUGIN_VERSION:-unknown}"
+
 python3 - "$TINYAI_ENV" > /tmp/tinyai-codex-smoke.json <<'PY'
 import hashlib
 import json
@@ -211,6 +237,7 @@ username = env("TINYAI_OBS_CODEX_USER_NAME") or env("TINYAI_OBS_USER_NAME") or e
 email = env("TINYAI_OBS_CODEX_USER_EMAIL") or env("TINYAI_OBS_USER_EMAIL")
 user_id = env("TINYAI_OBS_CODEX_USER_ID") or env("TINYAI_OBS_USER_ID") or email or username
 display_name = env("TINYAI_OBS_CODEX_USER_DISPLAY_NAME") or env("TINYAI_OBS_USER_DISPLAY_NAME") or username
+plugin_version = env("TINYAI_OBS_PLUGIN_VERSION", "unknown")
 machine = platform.node() or socket.gethostname() or "unknown"
 host_hash = hashlib.sha256(machine.encode("utf-8")).hexdigest()[:32]
 event_id = hashlib.sha256(f"codex-install-smoke:{machine}:{time.time()}".encode("utf-8")).hexdigest()[:32]
@@ -218,7 +245,7 @@ occurred_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 payload = {
     "client_id": f"codex-install-smoke-{host_hash}",
     "plugin_name": "tinyai-observability-codex",
-    "plugin_version": "install-smoke",
+    "plugin_version": plugin_version,
     "username": username,
     "user_id": user_id,
     "user_email": email,
@@ -244,6 +271,7 @@ payload = {
                 "smoke_test": True,
                 "source": "install-tinyai-observability",
                 "env_file": sys.argv[1],
+                "expected_runtime_plugin_version": plugin_version,
             },
         }
     ],
@@ -288,10 +316,13 @@ codex plugin list
 2. The env file should contain both `TINYAI_OBS_USER_NAME` and
    `TINYAI_OBS_CODEX_USER_NAME`.
 3. The collector smoke test should pass and create a `tool=codex`
-   `plugin_heartbeat`.
+   `plugin_heartbeat` with the installed plugin version. This smoke heartbeat
+   should not be treated as real conversation telemetry.
 4. Restart Codex or open a new Codex session.
 5. Ask a simple question in Codex.
-6. Check the TinyAI dashboard for a `tool=codex` session under the confirmed user.
+6. Check the TinyAI dashboard for a real `tool=codex` session under the
+   confirmed user. The real MCP heartbeat and session data should use the
+   installed plugin version, not `install-smoke`.
 
 ## Notes
 

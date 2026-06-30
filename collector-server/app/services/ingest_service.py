@@ -214,6 +214,20 @@ def _upsert_plugin(db: Session, batch: BatchIn) -> None:
         db.add(client)
 
 
+def _is_install_smoke_batch(batch: BatchIn) -> bool:
+    if not batch.events:
+        return False
+    for event in batch.events:
+        payload = event.payload or {}
+        if event.event_type != "plugin_heartbeat":
+            return False
+        if payload.get("smoke_test") is not True:
+            return False
+        if payload.get("source") != "install-tinyai-observability":
+            return False
+    return True
+
+
 def _insert_plugin_heartbeat(db: Session, batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> bool:
     if db.get(PluginHeartbeat, event.event_id):
         return False
@@ -2712,7 +2726,8 @@ def _sanitize_visible_reasoning(event: EventIn, payload: dict[str, Any]) -> tupl
 
 def ingest_batch(db: Session, batch: BatchIn) -> dict:
     _cleanup_ingest_history_if_due(db)
-    _upsert_plugin(db, batch)
+    if not _is_install_smoke_batch(batch):
+        _upsert_plugin(db, batch)
     accepted = 0
     duplicates = 0
     failed = 0
