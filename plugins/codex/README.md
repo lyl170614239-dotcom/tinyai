@@ -21,7 +21,7 @@ Teammates normally do not need to clone this repository. They can install from
 the Git marketplace entry exposed at the repository root:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref codex/plugin-marketplace --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -60,3 +60,8 @@ codex plugin add observability@tinyai
 - The Git marketplace entry for teammates is `.agents/plugins/marketplace.json`.
 - The local marketplace entry for this directory is
   `plugins/codex/.agents/plugins/marketplace.json`.
+- The recommended human prompt is:
+
+```text
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Codex 插件，我的姓名是张三。
+```

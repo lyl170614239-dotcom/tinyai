@@ -14,12 +14,25 @@ Default Git marketplace:
 https://github.com/lyl170614239-dotcom/tinyai.git
 ```
 
+Default branch:
+
+```text
+codex/plugin-marketplace
+```
+
 ## First install
 
 Run these commands:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+rm -rf /tmp/tinyai-observability-plugins
+git clone --depth 1 --branch codex/plugin-marketplace \
+  https://github.com/lyl170614239-dotcom/tinyai.git \
+  /tmp/tinyai-observability-plugins
+
+claude plugin validate /tmp/tinyai-observability-plugins/.claude-plugin/marketplace.json
+claude plugin validate /tmp/tinyai-observability-plugins/plugins/claude-code/.claude-plugin/plugin.json
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 claude plugin marketplace list
@@ -30,7 +43,7 @@ or stale cache, refresh the source first:
 
 ```bash
 claude plugin marketplace remove tinyai
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 claude plugin marketplace list

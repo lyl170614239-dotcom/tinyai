@@ -14,12 +14,18 @@ Default Git marketplace:
 https://github.com/lyl170614239-dotcom/tinyai.git
 ```
 
+Default branch:
+
+```text
+codex/plugin-marketplace
+```
+
 ## First install
 
 Run these commands:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref codex/plugin-marketplace --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -94,7 +100,7 @@ If this Codex version does not support `--sparse`, retry the marketplace add
 without it:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref codex/plugin-marketplace
 codex plugin add observability@tinyai
 codex plugin list
 ```

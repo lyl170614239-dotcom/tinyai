@@ -25,16 +25,24 @@ scripts/install.mjs               One-command local installer
 ### From Claude Code With A Git URL
 
 This repository exposes a Claude marketplace manifest at the repository root.
-A teammate can ask Claude Code to install the plugin from the Git URL:
+A teammate can ask Claude Code to install the plugin from the Git URL and the
+plugin marketplace branch:
 
 ```text
-请从 https://github.com/lyl170614239-dotcom/tinyai.git 安装 observability@tinyai 插件。
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Claude Code 插件，我的姓名是张三。
 ```
 
-Claude Code should run:
+Claude Code should follow the root `README.md` and `docs/install-claude.md`.
+For Claude Code versions that cannot add a Git marketplace branch directly,
+clone the branch first and add that local checkout as the marketplace:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+rm -rf /tmp/tinyai-observability-plugins
+git clone --depth 1 --branch codex/plugin-marketplace \
+  https://github.com/lyl170614239-dotcom/tinyai.git \
+  /tmp/tinyai-observability-plugins
+
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 ```
@@ -44,7 +52,7 @@ it again before installing:
 
 ```bash
 claude plugin marketplace remove tinyai
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 ```
