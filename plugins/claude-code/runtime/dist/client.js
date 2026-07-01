@@ -199,6 +199,16 @@ function safeErrorMessage(error) {
     const message = error instanceof Error ? error.message : String(error || "collector upload failed");
     return message.slice(0, 500);
 }
+export function uploadResultAllowsCursorCommit(result) {
+    if (result.queued)
+        return false;
+    if ((result.failed || 0) > 0)
+        return false;
+    if (!Array.isArray(result.events) || result.events.length === 0) {
+        return (result.accepted || 0) + (result.duplicates || 0) > 0;
+    }
+    return result.events.every((event) => event.status === "accepted" || event.status === "duplicate");
+}
 export class CollectorClient {
     baseUrl;
     baseUrls;

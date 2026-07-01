@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { cwd } from "node:process";
+import { backfillRecentClaudeTurns } from "./claude-backfill.js";
 import { CollectorClient } from "./client.js";
 import { loadTinyAiEnvFile, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool } from "./config.js";
 import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
@@ -17,8 +18,10 @@ const client = new CollectorClient({
     fallbackUrls: tinyAiCollectorFallbackUrlsForTool(tool, workspacePath)
 });
 let codexAutoCaptureTimer;
+let claudeBackfillTimer;
 let standaloneKeepAliveTimer;
 let codexAutoCaptureInFlight = false;
+let claudeBackfillInFlight = false;
 let lastCodexAutoCaptureSignature;
 let pluginHeartbeatUploaded = false;
 const tools = [
@@ -499,12 +502,51 @@ function startCodexAutoCapture() {
         codexAutoCaptureTimer.unref();
     }
 }
+async function backfillClaudeTurnsOnHeartbeat() {
+    if (tool !== "claude")
+        return;
+    if (claudeBackfillInFlight)
+        return;
+    claudeBackfillInFlight = true;
+    try {
+        const includeText = !["0", "false", "no", "off"].includes(String(process.env.TINYAI_OBS_CAPTURE_CONVERSATION_TEXT || "true").toLowerCase());
+        const recentMinutes = Number(process.env.TINYAI_OBS_CLAUDE_BACKFILL_RECENT_MINUTES || 30);
+        const maxFiles = Number(process.env.TINYAI_OBS_CLAUDE_BACKFILL_MAX_FILES || 8);
+        await backfillRecentClaudeTurns({
+            workspacePath,
+            includeText,
+            recentMinutes: Number.isFinite(recentMinutes) ? recentMinutes : 30,
+            maxFiles: Number.isFinite(maxFiles) ? maxFiles : 8,
+            client
+        });
+    }
+    catch {
+        // Local Claude logs may not exist yet; the next heartbeat interval retries.
+    }
+    finally {
+        claudeBackfillInFlight = false;
+    }
+}
+function startClaudeBackfill() {
+    if (tool !== "claude" || claudeBackfillTimer)
+        return;
+    const enabled = !["0", "false", "no", "off"].includes(String(process.env.TINYAI_OBS_CLAUDE_BACKFILL || "true").toLowerCase());
+    if (!enabled)
+        return;
+    void backfillClaudeTurnsOnHeartbeat();
+    const intervalMs = Number(process.env.TINYAI_OBS_CLAUDE_BACKFILL_INTERVAL_MS || (isStandaloneWatcher() ? 30_000 : 15_000));
+    claudeBackfillTimer = setInterval(() => void backfillClaudeTurnsOnHeartbeat(), Number.isFinite(intervalMs) && intervalMs >= 5_000 ? intervalMs : 15_000);
+    if (!isStandaloneWatcher()) {
+        claudeBackfillTimer.unref();
+    }
+}
 async function markMcpInitialized() {
     if (!pluginHeartbeatUploaded) {
         await client.upload(tool, [makeEvent({ tool, eventType: "plugin_heartbeat", workspacePath, payload: { mcp: true } })]);
         pluginHeartbeatUploaded = true;
     }
     startCodexAutoCapture();
+    startClaudeBackfill();
 }
 function isStandaloneWatcher() {
     return ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_STANDALONE || "").toLowerCase());

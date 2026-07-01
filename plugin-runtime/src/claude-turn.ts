@@ -133,6 +133,10 @@ export type ClaudeTurnSnapshot = {
     response_id: string;
     attempt: number;
     status: "completed" | "failed" | "incomplete";
+    interrupted?: boolean;
+    interrupt_reason?: string;
+    abandoned?: boolean;
+    finish_reason?: string;
     started_at?: string;
     completed_at?: string;
   };
@@ -286,6 +290,18 @@ function isRealUserPrompt(entry: JsonRecord): boolean {
   if (/^\[Request interrupted by user/i.test(text)) return false;
   if (/^Base directory for this skill:/i.test(text)) return false;
   return true;
+}
+
+function isClaudeUserInterruptMarker(entry: JsonRecord): boolean {
+  if (entry.type !== "user") return false;
+  const message = record(entry.message);
+  if (message?.role !== "user") return false;
+  const text = textFromClaudeContent(message.content, {
+    excludeToolBlocks: true,
+    excludeSystemReminder: true,
+    excludeContext: true
+  }).trim();
+  return /^\[Request interrupted by user/i.test(text);
 }
 
 async function countPriorClaudeUserTurns(filePath: string, startOffset: number, requestedSessionId?: string): Promise<number> {
@@ -508,6 +524,10 @@ type WorkingTurn = {
   assistantText?: string;
   assistantAt?: string;
   status: "completed" | "failed" | "incomplete";
+  interrupted?: boolean;
+  interruptReason?: string;
+  abandoned?: boolean;
+  finishReason?: string;
   model?: string;
   startedAt?: string;
   completedAt?: string;
@@ -670,6 +690,21 @@ function updateTurnContext(turn: WorkingTurn, entry: JsonRecord): void {
   turn.version = cleanString(entry.version) || turn.version;
 }
 
+function markTurnInterrupted(turn: WorkingTurn, occurredAt?: string): void {
+  turn.status = "failed";
+  turn.interrupted = true;
+  turn.interruptReason = "request_interrupted_by_user";
+  turn.finishReason = "request_interrupted_by_user";
+  turn.completedAt = occurredAt || turn.assistantAt || turn.startedAt;
+}
+
+function markTurnAbandoned(turn: WorkingTurn, occurredAt?: string): void {
+  turn.status = "failed";
+  turn.abandoned = true;
+  turn.finishReason = "next_user_turn_started";
+  turn.completedAt = occurredAt || turn.assistantAt || turn.startedAt;
+}
+
 function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeTurnSnapshot["source_files"]["claude_project_jsonl"]): ClaudeTurnSnapshot {
   const responseId = turn.responseId || `${turn.requestId}:no_response`;
   for (const change of turn.codeChanges) {
@@ -757,6 +792,10 @@ function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeT
       response_id: responseId,
       attempt: 1,
       status: turn.status,
+      interrupted: turn.interrupted || undefined,
+      interrupt_reason: turn.interruptReason,
+      abandoned: turn.abandoned || undefined,
+      finish_reason: turn.finishReason,
       started_at: turn.startedAt,
       completed_at: turn.completedAt
     },
@@ -819,7 +858,18 @@ export async function captureLatestClaudeTurnSnapshots(
   for (const { entry, lineStartOffset, lineEndOffset } of entries) {
     const sessionId = cleanString(entry.sessionId) || cleanString(entry.session_id) || requestedSessionId || basename(filePath, ".jsonl");
     if (requestedSessionId && sessionId !== requestedSessionId) continue;
+    if (isClaudeUserInterruptMarker(entry)) {
+      if (current) {
+        markTurnInterrupted(current, isoTimestamp(entry.timestamp));
+        current.endOffset = lineEndOffset;
+        finishCurrent();
+      }
+      continue;
+    }
     if (isRealUserPrompt(entry)) {
+      if (current && current.status === "incomplete") {
+        markTurnAbandoned(current, isoTimestamp(entry.timestamp));
+      }
       finishCurrent();
       turnIndex += 1;
       const text = textFromEntry(entry);

@@ -134,6 +134,19 @@ function isRealUserPrompt(entry) {
         return false;
     return true;
 }
+function isClaudeUserInterruptMarker(entry) {
+    if (entry.type !== "user")
+        return false;
+    const message = record(entry.message);
+    if (message?.role !== "user")
+        return false;
+    const text = textFromClaudeContent(message.content, {
+        excludeToolBlocks: true,
+        excludeSystemReminder: true,
+        excludeContext: true
+    }).trim();
+    return /^\[Request interrupted by user/i.test(text);
+}
 async function countPriorClaudeUserTurns(filePath, startOffset, requestedSessionId) {
     if (startOffset <= 0)
         return 0;
@@ -500,6 +513,19 @@ function updateTurnContext(turn, entry) {
     turn.entrypoint = cleanString(entry.entrypoint) || turn.entrypoint;
     turn.version = cleanString(entry.version) || turn.version;
 }
+function markTurnInterrupted(turn, occurredAt) {
+    turn.status = "failed";
+    turn.interrupted = true;
+    turn.interruptReason = "request_interrupted_by_user";
+    turn.finishReason = "request_interrupted_by_user";
+    turn.completedAt = occurredAt || turn.assistantAt || turn.startedAt;
+}
+function markTurnAbandoned(turn, occurredAt) {
+    turn.status = "failed";
+    turn.abandoned = true;
+    turn.finishReason = "next_user_turn_started";
+    turn.completedAt = occurredAt || turn.assistantAt || turn.startedAt;
+}
 function finalizeTurn(turn, sourcePath, sourceInfo) {
     const responseId = turn.responseId || `${turn.requestId}:no_response`;
     for (const change of turn.codeChanges) {
@@ -587,6 +613,10 @@ function finalizeTurn(turn, sourcePath, sourceInfo) {
             response_id: responseId,
             attempt: 1,
             status: turn.status,
+            interrupted: turn.interrupted || undefined,
+            interrupt_reason: turn.interruptReason,
+            abandoned: turn.abandoned || undefined,
+            finish_reason: turn.finishReason,
             started_at: turn.startedAt,
             completed_at: turn.completedAt
         },
@@ -648,7 +678,18 @@ export async function captureLatestClaudeTurnSnapshots(options = {}) {
         const sessionId = cleanString(entry.sessionId) || cleanString(entry.session_id) || requestedSessionId || basename(filePath, ".jsonl");
         if (requestedSessionId && sessionId !== requestedSessionId)
             continue;
+        if (isClaudeUserInterruptMarker(entry)) {
+            if (current) {
+                markTurnInterrupted(current, isoTimestamp(entry.timestamp));
+                current.endOffset = lineEndOffset;
+                finishCurrent();
+            }
+            continue;
+        }
         if (isRealUserPrompt(entry)) {
+            if (current && current.status === "incomplete") {
+                markTurnAbandoned(current, isoTimestamp(entry.timestamp));
+            }
             finishCurrent();
             turnIndex += 1;
             const text = textFromEntry(entry);

@@ -120,6 +120,10 @@ export type ClaudeTurnSnapshot = {
         response_id: string;
         attempt: number;
         status: "completed" | "failed" | "incomplete";
+        interrupted?: boolean;
+        interrupt_reason?: string;
+        abandoned?: boolean;
+        finish_reason?: string;
         started_at?: string;
         completed_at?: string;
     };

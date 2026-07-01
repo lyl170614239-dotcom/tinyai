@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { cwd } from "node:process";
 import {
   buildClaudeBashDeltaPayload,
@@ -9,9 +9,14 @@ import {
   readClaudeBashSnapshot,
   writeClaudeBashSnapshot
 } from "./claude-bash-delta.js";
+import {
+  captureClaudeTurnSnapshotsWithRetry,
+  commitClaudeTurnCursor,
+  startOffsetForClaudeTurnFile
+} from "./claude-backfill.js";
 import { captureLatestClaudeTurnSnapshots } from "./claude-turn.js";
 import { claudeWorkspaceDiffPathCandidates, hasClaudeExternalWriteSignal } from "./claude-workspace-fallback.js";
-import { CollectorClient } from "./client.js";
+import { CollectorClient, uploadResultAllowsCursorCommit } from "./client.js";
 import { loadTinyAiEnvFile } from "./config.js";
 import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
 import { captureLatestConversation, commitConversationCursor } from "./conversation.js";
@@ -62,81 +67,6 @@ const events =
     ? []
     : [makeEvent({ tool, eventType, taskId: hookTaskId, sessionId: hookSessionId, workspacePath, payload, sourceConfidence: "derived" })];
 const afterSuccessfulUpload: Array<() => Promise<void>> = [];
-
-type ClaudeTurnCursorRecord = {
-  file_path: string;
-  read_offset: number;
-  file_size: number;
-  session_id?: string;
-  updated_at: string;
-};
-
-function claudeTurnCursorStorePath(): string {
-  return join(process.env.TINYAI_OBS_CURSOR_DIR || join(homedir(), ".tinyai-observability", "cursors"), "claude-turn-cursors.json");
-}
-
-async function loadClaudeTurnCursorStore(): Promise<Record<string, ClaudeTurnCursorRecord>> {
-  try {
-    const parsed = JSON.parse(await readFile(claudeTurnCursorStorePath(), "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, ClaudeTurnCursorRecord> : {};
-  } catch {
-    return {};
-  }
-}
-
-async function saveClaudeTurnCursorStore(store: Record<string, ClaudeTurnCursorRecord>): Promise<void> {
-  const target = claudeTurnCursorStorePath();
-  await mkdir(dirname(target), { recursive: true });
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
-  await rename(tmp, target);
-}
-
-function claudeTurnCursorKey(filePath: string): string {
-  return stableEventId(`claude-turn-cursor:${filePath}`);
-}
-
-async function startOffsetForClaudeTurnFile(
-  filePath: string,
-  sessionId?: string,
-  options: { initializeAtEof?: boolean } = {}
-): Promise<{ startOffset: number; initializedAtEof: boolean }> {
-  const st = await stat(filePath);
-  const store = await loadClaudeTurnCursorStore();
-  const key = claudeTurnCursorKey(filePath);
-  const existing = store[key];
-  if (!existing) {
-    if (options.initializeAtEof === false) {
-      return { startOffset: 0, initializedAtEof: false };
-    }
-    store[key] = {
-      file_path: filePath,
-      read_offset: st.size,
-      file_size: st.size,
-      session_id: sessionId,
-      updated_at: new Date().toISOString()
-    };
-    await saveClaudeTurnCursorStore(store);
-    return { startOffset: st.size, initializedAtEof: true };
-  }
-  return { startOffset: Math.max(0, Math.min(existing.read_offset, st.size)), initializedAtEof: false };
-}
-
-async function commitClaudeTurnCursor(filePath: string, nextOffset: number, sessionId?: string): Promise<void> {
-  const st = await stat(filePath);
-  const store = await loadClaudeTurnCursorStore();
-  const key = claudeTurnCursorKey(filePath);
-  const existing = store[key];
-  if (existing && existing.read_offset > nextOffset) return;
-  store[key] = {
-    file_path: filePath,
-    read_offset: Math.max(0, Math.min(nextOffset, st.size)),
-    file_size: st.size,
-    session_id: sessionId || existing?.session_id,
-    updated_at: new Date().toISOString()
-  };
-  await saveClaudeTurnCursorStore(store);
-}
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -365,7 +295,7 @@ if (eventType === "turn_snapshot" && tool === "claude") {
     ? await startOffsetForClaudeTurnFile(sessionFile, hookSessionId, { initializeAtEof: false })
     : undefined;
   try {
-    const snapshots = await captureLatestClaudeTurnSnapshots({
+    const snapshots = await captureClaudeTurnSnapshotsWithRetry({
       includeText: captureText,
       sessionId: hookSessionId,
       workspacePath,
@@ -373,9 +303,11 @@ if (eventType === "turn_snapshot" && tool === "claude") {
       latestOnly: false,
       startOffset: cursorStart?.startOffset
     });
+    let commitOffset: number | undefined;
+    let commitSessionId: string | undefined;
     for (const snapshot of snapshots) {
       if (snapshot.turn.status === "incomplete") {
-        continue;
+        break;
       }
       const eventId = stableEventId(`claude:turn:${snapshot.session_id}:${snapshot.request_id}:${snapshot.response_id}`);
       const sourceInfo = objectRecord((snapshot.source_files as Record<string, unknown> | undefined)?.claude_project_jsonl);
@@ -403,8 +335,12 @@ if (eventType === "turn_snapshot" && tool === "claude") {
         });
       }
       if (sessionFile && Number.isFinite(nextOffset) && nextOffset >= 0) {
-        afterSuccessfulUpload.push(() => commitClaudeTurnCursor(sessionFile, nextOffset, snapshot.session_id));
+        commitOffset = nextOffset;
+        commitSessionId = snapshot.session_id;
       }
+    }
+    if (sessionFile && commitOffset !== undefined) {
+      afterSuccessfulUpload.push(() => commitClaudeTurnCursor(sessionFile, commitOffset, commitSessionId));
     }
   } catch (error) {
     events.push(
@@ -551,6 +487,8 @@ if (eventType === "task_end") {
 }
 
 if (events.length > 0) {
-  await new CollectorClient({ tool, workspacePath }).upload(tool, events);
-  for (const commit of afterSuccessfulUpload) await commit();
+  const uploadResult = await new CollectorClient({ tool, workspacePath }).upload(tool, events);
+  if (uploadResultAllowsCursorCommit(uploadResult)) {
+    for (const commit of afterSuccessfulUpload) await commit();
+  }
 }

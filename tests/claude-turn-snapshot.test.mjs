@@ -440,3 +440,149 @@ test("Claude turn parser keeps Agent prompt as tool evidence instead of a user m
   assert.ok(!snapshots[0].messages.some((message) => message.text.includes("I need to understand the system architecture")));
   assert.ok(!snapshots[0].messages.some((message) => message.text.includes("ide_opened_file")));
 });
+
+test("Claude turn parser finalizes a user-interrupted turn instead of dropping it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-interrupted-"));
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-architecture",
+      sessionId: "claude-interrupted-session",
+      timestamp: "2026-07-01T08:56:09.835Z",
+      message: { role: "user", content: [{ type: "text", text: "看看系统架构" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-thinking",
+      sessionId: "claude-interrupted-session",
+      timestamp: "2026-07-01T08:56:15.867Z",
+      message: {
+        id: "msg-architecture",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [{ type: "thinking", thinking: "I should inspect the repository structure." }]
+      }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-tool-use",
+      sessionId: "claude-interrupted-session",
+      timestamp: "2026-07-01T08:56:18.018Z",
+      message: {
+        id: "msg-architecture",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [
+          { type: "text", text: "Let me explore the codebase." },
+          { type: "tool_use", id: "call-list-files", name: "Bash", input: { command: "rg --files" } }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "tool-result",
+      sessionId: "claude-interrupted-session",
+      timestamp: "2026-07-01T08:56:21.092Z",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call-list-files", content: "README.md\nplugin-runtime/src/hook.ts", is_error: false }]
+      }
+    },
+    {
+      type: "user",
+      uuid: "interrupted-marker",
+      sessionId: "claude-interrupted-session",
+      timestamp: "2026-07-01T08:56:21.957Z",
+      message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] }
+    }
+  ];
+  await writeFile(sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-interrupted-session"
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].user_message.text, "看看系统架构");
+  assert.equal(snapshots[0].turn.status, "failed");
+  assert.equal(snapshots[0].turn.interrupted, true);
+  assert.equal(snapshots[0].turn.interrupt_reason, "request_interrupted_by_user");
+  assert.equal(snapshots[0].turn.finish_reason, "request_interrupted_by_user");
+  assert.equal(snapshots[0].tool_calls.length, 1);
+  assert.ok(snapshots[0].visible_reasoning.length > 0);
+  assert.equal(snapshots[0].messages.some((message) => message.text.includes("Request interrupted")), false);
+  assert.ok(snapshots[0].source_files.claude_project_jsonl.next_offset > 0);
+});
+
+test("Claude turn parser marks an unfinished previous turn abandoned when the next real user turn starts", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-abandoned-"));
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-one",
+      sessionId: "claude-abandoned-session",
+      timestamp: "2026-07-01T09:00:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "看看系统架构" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-one-progress",
+      sessionId: "claude-abandoned-session",
+      timestamp: "2026-07-01T09:00:05.000Z",
+      message: {
+        id: "msg-one",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [
+          { type: "text", text: "Let me explore the system architecture." },
+          { type: "tool_use", id: "call-tree", name: "Bash", input: { command: "find . -maxdepth 2 -type f" } }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "request-two",
+      sessionId: "claude-abandoned-session",
+      timestamp: "2026-07-01T09:01:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "你好" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-two",
+      sessionId: "claude-abandoned-session",
+      timestamp: "2026-07-01T09:01:05.000Z",
+      message: {
+        id: "msg-two",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "你好！有什么我可以帮你的吗？" }]
+      }
+    }
+  ];
+  await writeFile(sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-abandoned-session"
+  });
+
+  assert.equal(snapshots.length, 2);
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.user_message.text), ["看看系统架构", "你好"]);
+  assert.equal(snapshots[0].turn.status, "failed");
+  assert.equal(snapshots[0].turn.abandoned, true);
+  assert.equal(snapshots[0].turn.finish_reason, "next_user_turn_started");
+  assert.equal(snapshots[1].turn.status, "completed");
+  assert.equal(snapshots[1].assistant_message?.text, "你好！有什么我可以帮你的吗？");
+  assert.ok(snapshots[0].source_files.claude_project_jsonl.next_offset < snapshots[1].source_files.claude_project_jsonl.next_offset);
+});

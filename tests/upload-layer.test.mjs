@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
-import { CollectorClient } from "../plugin-runtime/dist/client.js";
+import { CollectorClient, uploadResultAllowsCursorCommit } from "../plugin-runtime/dist/client.js";
 import { readQueuedBatches } from "../plugin-runtime/dist/queue.js";
 
 function event(payload) {
@@ -96,4 +96,35 @@ test("queues failed uploads with error category metadata", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("upload result only allows cursor commit after accepted or duplicate events", () => {
+  assert.equal(uploadResultAllowsCursorCommit({
+    accepted: 1,
+    duplicates: 0,
+    failed: 0,
+    events: [{ event_id: "e1", event_type: "turn_snapshot", status: "accepted" }]
+  }), true);
+  assert.equal(uploadResultAllowsCursorCommit({
+    accepted: 0,
+    duplicates: 1,
+    failed: 0,
+    events: [{ event_id: "e1", event_type: "turn_snapshot", status: "duplicate" }]
+  }), true);
+  assert.equal(uploadResultAllowsCursorCommit({
+    accepted: 0,
+    duplicates: 0,
+    failed: 0,
+    queued: true,
+    events: [{ event_id: "e1", event_type: "turn_snapshot", status: "failed", reason: "retryable" }]
+  }), false);
+  assert.equal(uploadResultAllowsCursorCommit({
+    accepted: 1,
+    duplicates: 0,
+    failed: 1,
+    events: [
+      { event_id: "e1", event_type: "turn_snapshot", status: "accepted" },
+      { event_id: "e2", event_type: "turn_snapshot", status: "failed", reason: "schema_error" }
+    ]
+  }), false);
 });
