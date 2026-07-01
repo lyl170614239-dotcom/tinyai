@@ -57,10 +57,27 @@ def _content_from_message(message: dict[str, Any]) -> str:
     text = message.get("text")
     if isinstance(text, str):
         return text
+    preview = message.get("text_preview")
+    if isinstance(preview, str):
+        return preview
     value = message.get("content") or message.get("message")
     if isinstance(value, str):
         return value
     return ""
+
+
+def _text_blob_info(message: dict[str, Any]) -> dict[str, Any]:
+    ref = _json_record(message.get("text_blob_ref"))
+    if not ref:
+        return {}
+    return {
+        "content_storage": "blob_preview",
+        "blob_ref": str(ref.get("blob_ref") or "")[:512] or None,
+        "blob_encoding": str(ref.get("encoding") or "")[:64] or None,
+        "blob_original_bytes": _optional_number(ref.get("original_bytes")),
+        "blob_compressed_bytes": _optional_number(ref.get("compressed_bytes")),
+        "blob_sha256": str(ref.get("sha256") or "")[:128] or None,
+    }
 
 
 def _content_from_step(step: dict[str, Any]) -> str:
@@ -628,7 +645,8 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
         if not isinstance(raw, dict):
             continue
         content = _content_from_message(raw)
-        text_len = len(content) if content else int(raw.get("text_len") or 0)
+        blob_info = _text_blob_info(raw)
+        text_len = int(raw.get("text_len") or 0) if blob_info else (len(content) if content else int(raw.get("text_len") or 0))
         if not content.strip() and text_len == 0:
             continue
         role = _normalize_role(raw.get("role"))
@@ -638,7 +656,8 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
                 continue
             if _looks_like_claude_agent_prompt(content, payload):
                 continue
-            text_len = len(content)
+            if not blob_info:
+                text_len = len(content)
         explicit_turn_index = _safe_int(raw.get("turn_index") if raw.get("turn_index") is not None else raw.get("turn"))
         if explicit_turn_index and explicit_turn_index > 0:
             current_turn_index = explicit_turn_index
@@ -647,6 +666,7 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
         elif current_turn_index <= 0:
             current_turn_index = 1
         text_hash = str(raw.get("text_hash") or raw.get("content_hash") or _hash_text(content))
+        content_hash = text_hash if blob_info else (_hash_text(content) if is_claude_turn_snapshot and role == "user" else text_hash)
         occurred_at = raw.get("occurred_at") if isinstance(raw.get("occurred_at"), str) else _iso(event.occurred_at)
         source_key = raw.get("source_key") or raw.get("message_id")
         normalized = {
@@ -658,11 +678,12 @@ def _normalize_messages(event: EventIn, payload: dict[str, Any]) -> list[dict[st
             "response_id": str(raw.get("response_id") or raw.get("responseId") or "")[:256] or None,
             "role": role,
             "content": content,
-            "content_hash": _hash_text(content) if is_claude_turn_snapshot and role == "user" else text_hash,
+            "content_hash": content_hash,
             "text_len": text_len,
             "occurred_at": occurred_at,
             "raw_path": f"$.messages[{index}]",
             "raw_json": raw,
+            **blob_info,
         }
         if source_key:
             identity = f"{normalized['role']}:{source_key}"
@@ -784,6 +805,7 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
         return []
 
     changes: list[dict[str, Any]] = []
+    failed_tool_call_ids = _failed_tool_call_ids(payload)
     def first_int_present(*values: Any) -> int:
         for value in values:
             if value is None or isinstance(value, bool):
@@ -796,6 +818,9 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
 
     for index, raw in enumerate(files):
         if not isinstance(raw, dict):
+            continue
+        tool_call_id = str(raw.get("tool_call_id") or "")
+        if tool_call_id and tool_call_id in failed_tool_call_ids:
             continue
         lines_added = first_int_present(raw.get("lines_added"), raw.get("added_line_count"), payload.get("lines_added"), payload.get("ai_lines_added"))
         lines_deleted = first_int_present(raw.get("lines_deleted"), raw.get("removed_line_count"), payload.get("lines_deleted"), payload.get("ai_lines_deleted"))
@@ -867,6 +892,67 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
                 normalized_change[raw_diff_key] = raw.get(raw_diff_key)
         changes.append(normalized_change)
     return changes
+
+
+def _failed_tool_call_ids(payload: dict[str, Any]) -> set[str]:
+    failed: set[str] = set()
+    tool_calls = payload.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            tool_call_id = str(call.get("tool_call_id") or call.get("id") or "")
+            if not tool_call_id:
+                continue
+            status = str(call.get("status") or "").lower()
+            result_text = _compact_json_text(call.get("result_raw")).lower()
+            if _is_failed_or_rejected_tool_text(status) or _is_failed_or_rejected_tool_text(result_text):
+                failed.add(tool_call_id)
+
+    process_steps = payload.get("process_steps")
+    if isinstance(process_steps, list):
+        for step in process_steps:
+            if not isinstance(step, dict):
+                continue
+            if str(step.get("step_type") or "").lower() != "tool_result":
+                continue
+            tool_call_id = str(step.get("tool_call_id") or "")
+            if not tool_call_id:
+                continue
+            status = str(step.get("status") or "").lower()
+            text = str(step.get("text") or "").lower()
+            if _is_failed_or_rejected_tool_text(status) or _is_failed_or_rejected_tool_text(text):
+                failed.add(tool_call_id)
+    return failed
+
+
+def _compact_json_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _is_failed_or_rejected_tool_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "failed",
+            "error",
+            "user rejected tool use",
+            "tool use was rejected",
+            "tool interrupted",
+            "request interrupted",
+            "cancelled",
+            "canceled",
+            "denied",
+        )
+    )
 
 
 def _normalize_spec_accesses(event: EventIn, payload: dict[str, Any]) -> list[dict[str, Any]]:

@@ -262,6 +262,74 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["spec_accesses"][0]["doc_path"], "openspec/specs/a.md")
         self.assertEqual(normalized["request_usage"][0]["credits_source"], "claude")
 
+    def test_claude_turn_snapshot_ignores_rejected_edit_code_change(self):
+        payload = {
+            "session_id": "claude-session",
+            "request_id": "request-rejected-edit",
+            "response_id": "response-rejected-edit",
+            "turn": {
+                "turn_index": 1,
+                "request_id": "request-rejected-edit",
+                "response_id": "response-rejected-edit",
+                "status": "failed",
+                "interrupted": True,
+            },
+            "messages": [
+                {"role": "user", "text": "修改刘芸隆md，添加离别的故事", "text_hash": "u"},
+                {"role": "assistant", "text": "我来修改文件。", "text_hash": "a"},
+            ],
+            "tool_calls": [
+                {
+                    "tool_call_id": "call-edit-rejected",
+                    "tool_name": "replace_string_in_file",
+                    "arguments_raw": {
+                        "file_path": "/Users/user/code/ai-observability/刘芸隆.md",
+                        "old_string": "旧内容",
+                        "new_string": "新内容",
+                    },
+                    "status": "failed",
+                    "result_raw": "User rejected tool use",
+                }
+            ],
+            "process_steps": [
+                {
+                    "step_type": "tool_result",
+                    "tool_call_id": "call-edit-rejected",
+                    "tool_name": "replace_string_in_file",
+                    "status": "failed",
+                    "text": "The tool use was rejected.",
+                }
+            ],
+            "code_changes": [
+                {
+                    "snapshot_kind": "claude_turn_tool_patch",
+                    "file_path": "/Users/user/code/ai-observability/刘芸隆.md",
+                    "tool_call_id": "call-edit-rejected",
+                    "tool_name": "replace_string_in_file",
+                    "lines_added": 1,
+                    "lines_deleted": 1,
+                    "hunks": [
+                        {
+                            "old_start": 1,
+                            "old_lines": 1,
+                            "new_start": 1,
+                            "new_lines": 1,
+                            "lines": [
+                                {"line_type": "removed", "old_line": 1, "text": "旧内容", "text_hash": "old"},
+                                {"line_type": "added", "new_line": 1, "text": "新内容", "text_hash": "new"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(normalized["adapter"], "claude_turn_snapshot_v1")
+        self.assertEqual(normalized["turns"][0]["status"], "failed")
+        self.assertEqual(normalized["code_changes"], [])
+
     def test_claude_turn_snapshot_cleans_agent_prompt_and_ide_context(self):
         agent_prompt = (
             "I need to understand the system architecture of the ai-observability project at "

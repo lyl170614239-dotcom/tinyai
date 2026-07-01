@@ -520,6 +520,85 @@ test("Claude turn parser finalizes a user-interrupted turn instead of dropping i
   assert.ok(snapshots[0].source_files.claude_project_jsonl.next_offset > 0);
 });
 
+test("Claude turn parser does not report rejected edit tool use as a code change", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-rejected-edit-"));
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-edit",
+      sessionId: "claude-rejected-edit-session",
+      timestamp: "2026-07-01T11:05:38.955Z",
+      message: { role: "user", content: [{ type: "text", text: "修改刘芸隆md，添加离别的故事" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-edit-tool",
+      sessionId: "claude-rejected-edit-session",
+      timestamp: "2026-07-01T11:05:59.353Z",
+      message: {
+        id: "msg-edit",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [
+          { type: "text", text: "我来修改文件。" },
+          {
+            type: "tool_use",
+            id: "call-edit-rejected",
+            name: "replace_string_in_file",
+            input: {
+              file_path: "/Users/user/code/ai-observability/刘芸隆.md",
+              old_string: "壮哉刘芸隆！侠骨仁心，光照四方。江湖有幸，得此一人。",
+              new_string: "壮哉刘芸隆！侠骨仁心，光照四方。江湖有幸，得此一人。\n\n# 离别\n\n此去经年，江湖再会。",
+              replace_all: false
+            }
+          }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "rejected-edit-result",
+      sessionId: "claude-rejected-edit-session",
+      timestamp: "2026-07-01T11:06:02.562Z",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call-edit-rejected",
+            content: "The user doesn't want to proceed with this tool use. The tool use was rejected.",
+            is_error: true
+          }
+        ]
+      },
+      toolUseResult: "User rejected tool use"
+    },
+    {
+      type: "user",
+      uuid: "interrupted-marker",
+      sessionId: "claude-rejected-edit-session",
+      timestamp: "2026-07-01T11:06:02.564Z",
+      message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] }
+    }
+  ];
+  await writeFile(sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-rejected-edit-session"
+  });
+
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].tool_calls[0].tool_call_id, "call-edit-rejected");
+  assert.equal(snapshots[0].tool_calls[0].status, "failed");
+  assert.equal(snapshots[0].process_steps.some((step) => step.step_type === "tool_result" && step.status === "failed"), true);
+  assert.deepEqual(snapshots[0].code_changes, []);
+});
+
 test("Claude turn parser marks an unfinished previous turn abandoned when the next real user turn starts", async () => {
   const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-abandoned-"));
   const sessionFile = join(dir, "claude-session.jsonl");

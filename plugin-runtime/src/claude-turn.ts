@@ -570,10 +570,14 @@ function attachToolResult(turn: WorkingTurn, entry: JsonRecord): void {
     const toolCallId = cleanString(rec.tool_use_id) || cleanString(entry.sourceToolAssistantUUID) || `tool_result_${hashJson(rec).slice(0, 16)}`;
     const content = textFromClaudeContent([rec]);
     const existing = turn.tools.get(toolCallId);
+    const failed = isFailedToolResult(rec, entry);
     if (existing) {
-      existing.status = rec.is_error ? "failed" : "complete";
+      existing.status = failed ? "failed" : "complete";
       existing.result_raw = entry.toolUseResult || rec.content;
       existing.completed_at = at;
+    }
+    if (failed) {
+      turn.codeChanges = turn.codeChanges.filter((change) => change.tool_call_id !== toolCallId);
     }
     turn.steps.push({
       step_id: hashText(`${turn.requestId}:tool_result:${toolCallId}:${content}`).slice(0, 32),
@@ -584,12 +588,26 @@ function attachToolResult(turn: WorkingTurn, entry: JsonRecord): void {
       source_event_type: "tool_result",
       tool_call_id: toolCallId,
       tool_name: existing?.tool_name,
-      status: rec.is_error ? "failed" : "complete",
+      status: failed ? "failed" : "complete",
       occurred_at: at,
       actor_path: "top",
       actor_type: "assistant"
     });
   }
+}
+
+function isFailedToolResult(rec: JsonRecord, entry: JsonRecord): boolean {
+  if (rec.is_error === true || rec.isError === true) return true;
+  const result = entry.toolUseResult ?? rec.content;
+  if (typeof result === "string") {
+    return /user rejected tool use|tool use was rejected|tool interrupted|request interrupted|cancelled|canceled|denied/i.test(result);
+  }
+  const resultRecord = record(result);
+  if (resultRecord) {
+    const status = cleanString(resultRecord.status) || cleanString(resultRecord.error) || "";
+    if (/failed|error|rejected|interrupted|cancelled|canceled|denied/i.test(status)) return true;
+  }
+  return false;
 }
 
 function attachAssistantBlocks(turn: WorkingTurn, entry: JsonRecord): void {
@@ -707,7 +725,11 @@ function markTurnAbandoned(turn: WorkingTurn, occurredAt?: string): void {
 
 function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeTurnSnapshot["source_files"]["claude_project_jsonl"]): ClaudeTurnSnapshot {
   const responseId = turn.responseId || `${turn.requestId}:no_response`;
-  for (const change of turn.codeChanges) {
+  const confirmedCodeChanges = turn.codeChanges.filter((change) => {
+    const toolCall = change.tool_call_id ? turn.tools.get(change.tool_call_id) : undefined;
+    return !toolCall || toolCall.status === "complete";
+  });
+  for (const change of confirmedCodeChanges) {
     change.request_id = turn.requestId;
     change.response_id = responseId;
     change.turn_index = turn.turnIndex;
@@ -778,7 +800,7 @@ function finalizeTurn(turn: WorkingTurn, sourcePath: string, sourceInfo: ClaudeT
     visible_reasoning: visibleReasoning,
     process_steps: processSteps,
     tool_calls: [...turn.tools.values()],
-    code_changes: turn.codeChanges,
+    code_changes: confirmedCodeChanges,
     request_usage: requestUsage,
     usage_totals: {
       prompt_tokens: turn.usage.prompt_tokens,

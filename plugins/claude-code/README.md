@@ -104,7 +104,7 @@ claude plugin marketplace list
 When Claude Code starts the MCP server, it should use the installed cache path:
 
 ```text
-~/.claude/plugins/cache/tinyai/observability/0.1.14/runtime/dist/mcp-server.js
+~/.claude/plugins/cache/tinyai/observability/0.1.15/runtime/dist/mcp-server.js
 ```
 
 Check for stale development processes:
