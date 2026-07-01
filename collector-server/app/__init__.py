@@ -1,2 +1,0 @@
-"""TinyAI observability collector."""
-

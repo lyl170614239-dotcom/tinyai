@@ -10,7 +10,7 @@
         "source": "git-subdir",
         "url": "https://github.com/lyl170614239-dotcom/tinyai.git",
         "path": "plugins/codex/plugins/observability",
-        "ref": "main"
+        "ref": "codex/plugin-marketplace"
       },
       "policy": {
         "installation": "AVAILABLE",
