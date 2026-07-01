@@ -1,5 +1,6 @@
 export * from "./client.js";
 export * from "./claude-bash-delta.js";
+export * from "./claude-backfill.js";
 export * from "./claude-turn.js";
 export * from "./claude-workspace-fallback.js";
 export * from "./config.js";

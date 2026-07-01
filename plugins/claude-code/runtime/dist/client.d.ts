@@ -10,6 +10,7 @@ export interface CollectorClientOptions {
     queuePath?: string;
 }
 export declare function isCollectorUploadAllowedForUrl(baseUrl: string, token: string): boolean;
+export declare function uploadResultAllowsCursorCommit(result: BatchUploadResult): boolean;
 export declare class CollectorClient {
     private readonly baseUrl;
     private readonly baseUrls;

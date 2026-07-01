@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "TinyAI observability plugins for Claude Code coding telemetry.",
-    "version": "0.1.12"
+    "version": "0.1.14"
   },
   "plugins": [
     {
       "name": "observability",
       "source": "./plugins/claude-code",
       "description": "Capture Claude Code task telemetry, conversation snapshots, specs reads, feedback, and code adoption signals.",
-      "version": "0.1.12",
+      "version": "0.1.14",
       "author": {
         "name": "TinyAI"
       },

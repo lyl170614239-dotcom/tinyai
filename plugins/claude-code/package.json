@@ -1,6 +1,6 @@
 {
   "name": "@tinyai/claude-code-observability-plugin",
-  "version": "0.1.12",
+  "version": "0.1.14",
   "description": "Claude Code plugin for TinyAI observability telemetry, specs reads, hooks, and MCP tools.",
   "private": false,
   "license": "UNLICENSED",

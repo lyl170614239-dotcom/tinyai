@@ -21,7 +21,7 @@ Code/Copilot extension unless the user explicitly asks for them too.
 - Marketplace name: `tinyai`
 - Plugin name: `observability`
 - Install name: `observability@tinyai`
-- Current version: `0.1.12`
+- Current version: `0.1.14`
 - Plugin path in this branch: `plugins/claude-code`
 - Root marketplace manifest: `.claude-plugin/marketplace.json`
 
@@ -87,7 +87,7 @@ Before claiming success:
 
 1. `claude plugin validate` passes for the marketplace and plugin manifest.
 2. `claude plugin list` shows `observability@tinyai` installed and enabled.
-3. The installed version is `0.1.12`.
+3. The installed version is `0.1.14`.
 4. The TinyAI collector health endpoint is reachable.
 5. A `plugin_heartbeat` smoke event with `tool=claude` is accepted.
 
@@ -99,7 +99,7 @@ Claude Code window.
 After install, Claude Code should run the plugin from a cache path like:
 
 ```text
-~/.claude/plugins/cache/tinyai/observability/0.1.12/runtime/dist/mcp-server.js
+~/.claude/plugins/cache/tinyai/observability/0.1.14/runtime/dist/mcp-server.js
 ```
 
 If old development processes are running from a repository path such as
