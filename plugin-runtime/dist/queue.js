@@ -9,9 +9,39 @@ function toolFromBatch(batch) {
 export function defaultQueuePath(tool) {
     return tinyAiQueuePathForTool(tool || process.env.TINYAI_OBS_TOOL);
 }
-export async function enqueueBatch(batch, queuePath = defaultQueuePath(toolFromBatch(batch))) {
+function queueIdFor(batch) {
+    const eventIds = (batch.events || []).map((event) => event.event_id).join(":");
+    return `${toolFromBatch(batch) || "unknown"}:${eventIds || Date.now()}`;
+}
+function queueEntryFromBatch(batch, options = {}) {
+    const now = new Date().toISOString();
+    return {
+        schema_version: "tinyai.queue.v2",
+        queue_id: queueIdFor(batch),
+        tool: toolFromBatch(batch),
+        status: "queued",
+        retry_count: options.retryCount || 0,
+        first_seen_at: now,
+        last_attempt_at: now,
+        next_retry_at: options.nextRetryAt,
+        last_error: options.lastError,
+        error_category: options.errorCategory || "retryable",
+        batch
+    };
+}
+function batchFromQueueLine(value) {
+    if (!value || typeof value !== "object")
+        return undefined;
+    const record = value;
+    if (record.schema_version === "tinyai.queue.v2") {
+        const batch = record.batch;
+        return batch && typeof batch === "object" ? batch : undefined;
+    }
+    return record.events && Array.isArray(record.events) ? record : undefined;
+}
+export async function enqueueBatch(batch, queuePath = defaultQueuePath(toolFromBatch(batch)), options = {}) {
     await mkdir(dirname(queuePath), { recursive: true });
-    await writeFile(queuePath, `${JSON.stringify(batch)}\n`, { flag: "a" });
+    await writeFile(queuePath, `${JSON.stringify(queueEntryFromBatch(batch, options))}\n`, { flag: "a" });
     const info = await stat(queuePath).catch(() => undefined);
     if (info && info.size > MAX_QUEUE_BYTES) {
         const batches = await readQueuedBatches(queuePath);
@@ -25,7 +55,9 @@ export async function readQueuedBatches(queuePath = defaultQueuePath()) {
         const corrupt = [];
         for (const line of raw.split("\n").filter(Boolean)) {
             try {
-                batches.push(JSON.parse(line));
+                const batch = batchFromQueueLine(JSON.parse(line));
+                if (batch)
+                    batches.push(batch);
             }
             catch {
                 corrupt.push(line);
@@ -49,6 +81,6 @@ export async function replaceQueue(batches, queuePath = defaultQueuePath()) {
         return;
     }
     const temp = `${queuePath}.tmp`;
-    await writeFile(temp, batches.map((batch) => JSON.stringify(batch)).join("\n") + "\n");
+    await writeFile(temp, batches.map((batch) => JSON.stringify(queueEntryFromBatch(batch))).join("\n") + "\n");
     await rename(temp, queuePath);
 }

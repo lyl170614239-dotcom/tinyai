@@ -1,5 +1,25 @@
 import type { EventBatch, ToolName } from "./event-schema.js";
+export type QueueErrorCategory = "retryable" | "payload_too_large" | "config_error" | "schema_error" | "rate_limited" | "unknown";
+export type QueuedBatchEntry = {
+    schema_version: "tinyai.queue.v2";
+    queue_id: string;
+    tool?: ToolName;
+    status: "queued";
+    retry_count: number;
+    first_seen_at: string;
+    last_attempt_at: string;
+    next_retry_at?: string;
+    last_error?: string;
+    error_category: QueueErrorCategory;
+    batch: EventBatch;
+};
+export type EnqueueBatchOptions = {
+    errorCategory?: QueueErrorCategory;
+    lastError?: string;
+    retryCount?: number;
+    nextRetryAt?: string;
+};
 export declare function defaultQueuePath(tool?: ToolName | string): string;
-export declare function enqueueBatch(batch: EventBatch, queuePath?: string): Promise<void>;
+export declare function enqueueBatch(batch: EventBatch, queuePath?: string, options?: EnqueueBatchOptions): Promise<void>;
 export declare function readQueuedBatches(queuePath?: string): Promise<EventBatch[]>;
 export declare function replaceQueue(batches: EventBatch[], queuePath?: string): Promise<void>;
