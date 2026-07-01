@@ -7,6 +7,7 @@ import { enqueueBatch, readQueuedBatches, replaceQueue } from "./queue.js";
 loadTinyAiEnvFile();
 const TURN_BLOB_INLINE_LIMIT = Number(process.env.TINYAI_OBS_TURN_BLOB_INLINE_LIMIT || 64 * 1024);
 const TURN_BLOB_CHUNK_BYTES = Number(process.env.TINYAI_OBS_TURN_BLOB_CHUNK_BYTES || 256 * 1024);
+const TURN_TEXT_PREVIEW_CHARS = Number(process.env.TINYAI_OBS_TURN_TEXT_PREVIEW_CHARS || 2000);
 const RAW_BLOB_KEYS = new Set([
     "arguments_raw",
     "result_raw",
@@ -128,6 +129,19 @@ function blobifyValue(value, blobKey) {
         }
     };
 }
+function blobifyTextValue(value, blobKey) {
+    if (typeof value !== "string" || byteLength(value) <= TURN_BLOB_INLINE_LIMIT)
+        return undefined;
+    const blobified = blobifyValue(value, blobKey);
+    if (!blobified)
+        return undefined;
+    return {
+        ...blobified,
+        hash: sha256(value),
+        preview: value.slice(0, TURN_TEXT_PREVIEW_CHARS),
+        textLen: value.length
+    };
+}
 function blobifyTurnPayload(payload) {
     const blobs = [];
     const visit = (value, path) => {
@@ -146,6 +160,17 @@ function blobifyTurnPayload(payload) {
                     continue;
                 }
             }
+            if (key === "text") {
+                const blobified = blobifyTextValue(child, childPath);
+                if (blobified) {
+                    blobs.push(blobified.blob);
+                    output.text_preview = blobified.preview;
+                    output.text_hash = typeof output.text_hash === "string" ? output.text_hash : blobified.hash;
+                    output.text_len = typeof output.text_len === "number" ? output.text_len : blobified.textLen;
+                    output.text_blob_ref = blobified.ref;
+                    continue;
+                }
+            }
             output[key] = visit(child, childPath);
         }
         return output;
@@ -155,6 +180,24 @@ function blobifyTurnPayload(payload) {
         rewritten.raw_event_blobs = blobs;
     }
     return rewritten;
+}
+function classifyUploadError(error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error || "").toLowerCase();
+    if (/\b413\b|payload too large|request entity too large|content too large/.test(message))
+        return "payload_too_large";
+    if (/\b401\b|\b403\b|invalid collector token|requires a bearer token|upload blocked/.test(message))
+        return "config_error";
+    if (/\b400\b|schema|validation/.test(message))
+        return "schema_error";
+    if (/\b429\b|rate limit|too many requests/.test(message))
+        return "rate_limited";
+    if (/\b5\d\d\b|timeout|timed out|econn|enotfound|fetch failed|network/.test(message))
+        return "retryable";
+    return "unknown";
+}
+function safeErrorMessage(error) {
+    const message = error instanceof Error ? error.message : String(error || "collector upload failed");
+    return message.slice(0, 500);
 }
 export class CollectorClient {
     baseUrl;
@@ -205,8 +248,9 @@ export class CollectorClient {
             await this.flushQueue(tool);
             return result;
         }
-        catch {
-            await enqueueBatch(batch, queuePath);
+        catch (error) {
+            const errorCategory = classifyUploadError(error);
+            await enqueueBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
             return {
                 accepted: 0,
                 duplicates: 0,
@@ -217,7 +261,7 @@ export class CollectorClient {
                     event_id: event.event_id,
                     event_type: event.event_type,
                     status: "failed",
-                    reason: "queued_for_retry"
+                    reason: errorCategory
                 }))
             };
         }

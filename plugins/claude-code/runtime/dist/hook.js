@@ -9,7 +9,7 @@ import { claudeWorkspaceDiffPathCandidates, hasClaudeExternalWriteSignal } from 
 import { CollectorClient } from "./client.js";
 import { loadTinyAiEnvFile } from "./config.js";
 import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
-import { captureLatestConversation } from "./conversation.js";
+import { captureLatestConversation, commitConversationCursor } from "./conversation.js";
 import { makeEvent, stableEventId } from "./event-schema.js";
 import { commitSnapshot, currentDiffDetails, diffSummary, pushSnapshot, recordAiLineSnapshot } from "./git.js";
 async function readStdin() {
@@ -392,6 +392,7 @@ if (eventType === "task_end") {
                 workspacePath: snapshot.cwd || workspacePath,
                 snapshotKind: "codex_hook_task_end"
             }));
+            afterSuccessfulUpload.push(() => commitConversationCursor(snapshot).then(() => undefined));
         }
         else {
             events.push(makeEvent({
@@ -476,9 +477,7 @@ if (eventType === "task_end") {
     }
 }
 if (events.length > 0) {
-    const result = await new CollectorClient({ tool, workspacePath }).upload(tool, events);
-    if (!result.queued) {
-        for (const commit of afterSuccessfulUpload)
-            await commit();
-    }
+    await new CollectorClient({ tool, workspacePath }).upload(tool, events);
+    for (const commit of afterSuccessfulUpload)
+        await commit();
 }

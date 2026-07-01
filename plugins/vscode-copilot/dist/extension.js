@@ -263,9 +263,39 @@ function toolFromBatch(batch) {
 function defaultQueuePath(tool) {
   return tinyAiQueuePathForTool(tool || process.env.TINYAI_OBS_TOOL);
 }
-async function enqueueBatch(batch, queuePath = defaultQueuePath(toolFromBatch(batch))) {
+function queueIdFor(batch) {
+  const eventIds = (batch.events || []).map((event2) => event2.event_id).join(":");
+  return `${toolFromBatch(batch) || "unknown"}:${eventIds || Date.now()}`;
+}
+function queueEntryFromBatch(batch, options = {}) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  return {
+    schema_version: "tinyai.queue.v2",
+    queue_id: queueIdFor(batch),
+    tool: toolFromBatch(batch),
+    status: "queued",
+    retry_count: options.retryCount || 0,
+    first_seen_at: now,
+    last_attempt_at: now,
+    next_retry_at: options.nextRetryAt,
+    last_error: options.lastError,
+    error_category: options.errorCategory || "retryable",
+    batch
+  };
+}
+function batchFromQueueLine(value) {
+  if (!value || typeof value !== "object")
+    return void 0;
+  const record4 = value;
+  if (record4.schema_version === "tinyai.queue.v2") {
+    const batch = record4.batch;
+    return batch && typeof batch === "object" ? batch : void 0;
+  }
+  return record4.events && Array.isArray(record4.events) ? record4 : void 0;
+}
+async function enqueueBatch(batch, queuePath = defaultQueuePath(toolFromBatch(batch)), options = {}) {
   await mkdir(dirname(queuePath), { recursive: true });
-  await writeFile(queuePath, `${JSON.stringify(batch)}
+  await writeFile(queuePath, `${JSON.stringify(queueEntryFromBatch(batch, options))}
 `, { flag: "a" });
   const info = await stat(queuePath).catch(() => void 0);
   if (info && info.size > MAX_QUEUE_BYTES) {
@@ -280,7 +310,9 @@ async function readQueuedBatches(queuePath = defaultQueuePath()) {
     const corrupt = [];
     for (const line of raw.split("\n").filter(Boolean)) {
       try {
-        batches.push(JSON.parse(line));
+        const batch = batchFromQueueLine(JSON.parse(line));
+        if (batch)
+          batches.push(batch);
       } catch {
         corrupt.push(line);
       }
@@ -303,7 +335,7 @@ async function replaceQueue(batches, queuePath = defaultQueuePath()) {
     return;
   }
   const temp = `${queuePath}.tmp`;
-  await writeFile(temp, batches.map((batch) => JSON.stringify(batch)).join("\n") + "\n");
+  await writeFile(temp, batches.map((batch) => JSON.stringify(queueEntryFromBatch(batch))).join("\n") + "\n");
   await rename(temp, queuePath);
 }
 
@@ -311,6 +343,7 @@ async function replaceQueue(batches, queuePath = defaultQueuePath()) {
 loadTinyAiEnvFile();
 var TURN_BLOB_INLINE_LIMIT = Number(process.env.TINYAI_OBS_TURN_BLOB_INLINE_LIMIT || 64 * 1024);
 var TURN_BLOB_CHUNK_BYTES = Number(process.env.TINYAI_OBS_TURN_BLOB_CHUNK_BYTES || 256 * 1024);
+var TURN_TEXT_PREVIEW_CHARS = Number(process.env.TINYAI_OBS_TURN_TEXT_PREVIEW_CHARS || 2e3);
 var RAW_BLOB_KEYS = /* @__PURE__ */ new Set([
   "arguments_raw",
   "result_raw",
@@ -418,6 +451,19 @@ function blobifyValue(value, blobKey) {
     }
   };
 }
+function blobifyTextValue(value, blobKey) {
+  if (typeof value !== "string" || byteLength(value) <= TURN_BLOB_INLINE_LIMIT)
+    return void 0;
+  const blobified = blobifyValue(value, blobKey);
+  if (!blobified)
+    return void 0;
+  return {
+    ...blobified,
+    hash: sha256(value),
+    preview: value.slice(0, TURN_TEXT_PREVIEW_CHARS),
+    textLen: value.length
+  };
+}
 function blobifyTurnPayload(payload) {
   const blobs = [];
   const visit = (value, path) => {
@@ -436,6 +482,17 @@ function blobifyTurnPayload(payload) {
           continue;
         }
       }
+      if (key === "text") {
+        const blobified = blobifyTextValue(child, childPath);
+        if (blobified) {
+          blobs.push(blobified.blob);
+          output.text_preview = blobified.preview;
+          output.text_hash = typeof output.text_hash === "string" ? output.text_hash : blobified.hash;
+          output.text_len = typeof output.text_len === "number" ? output.text_len : blobified.textLen;
+          output.text_blob_ref = blobified.ref;
+          continue;
+        }
+      }
       output[key] = visit(child, childPath);
     }
     return output;
@@ -445,6 +502,24 @@ function blobifyTurnPayload(payload) {
     rewritten.raw_event_blobs = blobs;
   }
   return rewritten;
+}
+function classifyUploadError(error) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error || "").toLowerCase();
+  if (/\b413\b|payload too large|request entity too large|content too large/.test(message))
+    return "payload_too_large";
+  if (/\b401\b|\b403\b|invalid collector token|requires a bearer token|upload blocked/.test(message))
+    return "config_error";
+  if (/\b400\b|schema|validation/.test(message))
+    return "schema_error";
+  if (/\b429\b|rate limit|too many requests/.test(message))
+    return "rate_limited";
+  if (/\b5\d\d\b|timeout|timed out|econn|enotfound|fetch failed|network/.test(message))
+    return "retryable";
+  return "unknown";
+}
+function safeErrorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error || "collector upload failed");
+  return message.slice(0, 500);
 }
 var CollectorClient = class {
   baseUrl;
@@ -491,8 +566,9 @@ var CollectorClient = class {
       const result = await this.postBatch(batch);
       await this.flushQueue(tool);
       return result;
-    } catch {
-      await enqueueBatch(batch, queuePath);
+    } catch (error) {
+      const errorCategory = classifyUploadError(error);
+      await enqueueBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
       return {
         accepted: 0,
         duplicates: 0,
@@ -503,7 +579,7 @@ var CollectorClient = class {
           event_id: event2.event_id,
           event_type: event2.event_type,
           status: "failed",
-          reason: "queued_for_retry"
+          reason: errorCategory
         }))
       };
     }
@@ -2813,7 +2889,7 @@ async function migrateLegacyCollectorUrl() {
     await settings.update("collectorUrl", DEFAULT_COLLECTOR_URL, vscode.ConfigurationTarget.Global);
   }
 }
-var PLUGIN_VERSION = "0.1.46";
+var PLUGIN_VERSION = "0.1.47";
 function pluginNameForTool(tool) {
   if (tool === "codex") return "tinyai-observability-codex";
   return "tinyai-observability-vscode";
@@ -4359,7 +4435,7 @@ function applyTurnUploadResult(seen, result) {
     } else {
       seen[seenKey] = {
         ...current,
-        status: eventResult.reason === "queued_for_retry" ? "queued" : "failed",
+        status: result.queued ? "queued" : "failed",
         error_count: (current.error_count || 0) + 1,
         last_error: eventResult.reason || "upload_failed"
       };

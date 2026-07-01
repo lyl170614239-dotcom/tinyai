@@ -4,7 +4,7 @@
     "name": "TinyAI"
   },
   "description": "TinyAI observability plugins distributed through npm-backed Claude Code plugin sources.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "plugins": [
     {
       "name": "observability",
@@ -12,10 +12,10 @@
       "source": {
         "source": "npm",
         "package": "@tinyai/claude-code-observability-plugin",
-        "version": "0.1.11"
+        "version": "0.1.12"
       },
       "description": "Capture Claude Code task telemetry, conversation snapshots, specs reads, feedback, and code adoption signals.",
-      "version": "0.1.11",
+      "version": "0.1.12",
       "author": {
         "name": "TinyAI"
       },

@@ -260,7 +260,7 @@ async function migrateLegacyCollectorUrl() {
   }
 }
 
-const PLUGIN_VERSION = "0.1.46";
+const PLUGIN_VERSION = "0.1.47";
 
 function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
   if (tool === "codex") return "tinyai-observability-codex";
@@ -2608,7 +2608,7 @@ function applyTurnUploadResult(seen: CopilotTurnCaptureStateStore, result: Batch
     } else {
       seen[seenKey] = {
         ...current,
-        status: eventResult.reason === "queued_for_retry" ? "queued" : "failed",
+        status: result.queued ? "queued" : "failed",
         error_count: (current.error_count || 0) + 1,
         last_error: eventResult.reason || "upload_failed"
       };
