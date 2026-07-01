@@ -1,6 +1,0 @@
-pages:
-  - path: orders/order-status.md
-    title: Official order status workflow
-    keywords:
-      - order
-      - status

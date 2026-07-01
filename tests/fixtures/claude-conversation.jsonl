@@ -1,7 +1,0 @@
-{"type":"user","uuid":"u-1","timestamp":"2026-06-24T01:00:00Z","sessionId":"claude-test-session","message":{"role":"user","content":"继续"}}
-{"type":"assistant","uuid":"a-tool","timestamp":"2026-06-24T01:00:01Z","sessionId":"claude-test-session","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"README.md"}}]}}
-{"type":"user","uuid":"tool-result","timestamp":"2026-06-24T01:00:02Z","sessionId":"claude-test-session","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}
-{"type":"assistant","uuid":"a-1","timestamp":"2026-06-24T01:00:03Z","sessionId":"claude-test-session","message":{"role":"assistant","content":[{"type":"text","text":"第一轮完成"}]}}
-{"type":"assistant","uuid":"a-1","timestamp":"2026-06-24T01:00:03Z","sessionId":"claude-test-session","message":{"role":"assistant","content":[{"type":"text","text":"第一轮完成"}]}}
-{"type":"user","uuid":"u-2","timestamp":"2026-06-24T01:01:00Z","sessionId":"claude-test-session","message":{"role":"user","content":"继续"}}
-{"type":"assistant","uuid":"a-2","timestamp":"2026-06-24T01:01:03Z","sessionId":"claude-test-session","message":{"role":"assistant","content":[{"type":"text","text":"第二轮完成"}]}}
