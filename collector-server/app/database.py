@@ -12,10 +12,37 @@ class Base(DeclarativeBase):
     pass
 
 
+def mysql_connect_args(settings) -> dict[str, int]:
+    if not settings.database_url.startswith("mysql"):
+        return {}
+    return {
+        "connect_timeout": settings.mysql_connect_timeout_seconds,
+        "read_timeout": settings.mysql_read_timeout_seconds,
+        "write_timeout": settings.mysql_write_timeout_seconds,
+    }
+
+
+def database_engine_kwargs(settings) -> dict:
+    kwargs = {
+        "pool_pre_ping": True,
+        "connect_args": mysql_connect_args(settings),
+    }
+    if settings.database_url.startswith("mysql"):
+        kwargs.update(
+            {
+                "pool_size": settings.db_pool_size,
+                "max_overflow": settings.db_max_overflow,
+                "pool_timeout": settings.db_pool_timeout_seconds,
+                "pool_recycle": settings.db_pool_recycle_seconds,
+            }
+        )
+    return kwargs
+
+
+settings = get_settings()
 engine = create_engine(
-    get_settings().database_url,
-    pool_pre_ping=True,
-    pool_recycle=1800,
+    settings.database_url,
+    **database_engine_kwargs(settings),
 )
 
 

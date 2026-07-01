@@ -7,6 +7,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "mysql+pymysql://tinyobs:tinyobs@localhost:13306/tinyobs"
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    db_pool_timeout_seconds: int = 5
+    db_pool_recycle_seconds: int = 1800
+    mysql_connect_timeout_seconds: int = 5
+    mysql_read_timeout_seconds: int = 30
+    mysql_write_timeout_seconds: int = 30
     api_token: str = ""
     cors_origins: str = "*"
     github_api_url: str = "https://api.github.com"
