@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -16,15 +17,21 @@ assertFile(manifestPath, "Claude plugin manifest");
 assertFile(marketplacePath, "Claude marketplace manifest");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const pluginName = String(manifest.name || "observability");
+const pluginVersion = String(manifest.version || "").trim();
 const pluginId = `${pluginName}@${marketplaceName}`;
+const installPath = join(homedir(), ".claude", "plugins", "cache", marketplaceName, pluginName, pluginVersion);
 
 run("claude", ["plugin", "validate", manifestPath], { dryRun });
 run("claude", ["plugin", "validate", marketplacePath], { dryRun });
 
+let cleanup = { cleanedOldCaches: [], updatedClaudeJsonProjectMcpConfigs: 0 };
 if (!skipInstall) {
   run("claude", ["plugin", "marketplace", "add", pluginRoot], { dryRun, allowFailure: true });
   run("claude", ["plugin", "marketplace", "update", marketplaceName], { dryRun, allowFailure: true });
   run("claude", ["plugin", "install", pluginId], { dryRun });
+  if (!dryRun) {
+    cleanup = cleanupLocalClaudeConfig({ installPath, pluginVersion, marketplaceName, pluginName });
+  }
 }
 
 console.log(JSON.stringify({
@@ -33,6 +40,8 @@ console.log(JSON.stringify({
   pluginRoot,
   marketplacePath,
   pluginId,
+  installPath,
+  ...cleanup,
   nextSteps: [
     "Restart Claude Code or reload the VS Code Claude Code window.",
     "Verify with: claude plugin validate " + manifestPath,
@@ -82,4 +91,68 @@ function run(command, commandArgs, options = {}) {
   if (result.status !== 0 && !options.allowFailure) {
     throw new Error(`Command failed (${result.status}): ${printable}`);
   }
+}
+
+function cleanupLocalClaudeConfig({ installPath, pluginVersion, marketplaceName, pluginName }) {
+  const claudeJsonPath = join(homedir(), ".claude.json");
+  const updatedClaudeJsonProjectMcpConfigs = updateClaudeProjectMcpConfigs(claudeJsonPath, installPath, pluginVersion);
+  const cacheRoot = join(homedir(), ".claude", "plugins", "cache", marketplaceName, pluginName);
+  const cleanedOldCaches = cleanupOldPluginCaches(cacheRoot, installPath);
+  return { cleanedOldCaches, updatedClaudeJsonProjectMcpConfigs };
+}
+
+function updateClaudeProjectMcpConfigs(path, nextInstallPath, nextVersion) {
+  if (!existsSync(path)) return 0;
+  const root = JSON.parse(readFileSync(path, "utf8"));
+  const projects = root.projects && typeof root.projects === "object" && !Array.isArray(root.projects) ? root.projects : {};
+  const nextMcpServer = join(nextInstallPath, "runtime", "dist", "mcp-server.js");
+  let updatedCount = 0;
+  for (const project of Object.values(projects)) {
+    if (!project || typeof project !== "object" || Array.isArray(project)) continue;
+    const servers = project.mcpServers && typeof project.mcpServers === "object" && !Array.isArray(project.mcpServers)
+      ? project.mcpServers
+      : {};
+    for (const [serverName, server] of Object.entries(servers)) {
+      if (!server || typeof server !== "object" || Array.isArray(server)) continue;
+      if (!isTinyAiObservabilityServer(serverName, server)) continue;
+      let changed = false;
+      const args = Array.isArray(server.args) ? server.args : [];
+      const hasCacheArg = args.some((value) =>
+        typeof value === "string" && /\/\.claude\/plugins\/cache\/tinyai\/observability\/[^/]+\/runtime\/dist\/mcp-server\.js$/.test(value)
+      );
+      if (hasCacheArg || serverName === "tinyai-observability") {
+        server.args = [nextMcpServer];
+        changed = true;
+      }
+      if (!server.env || typeof server.env !== "object" || Array.isArray(server.env)) server.env = {};
+      if (server.env.TINYAI_OBS_PLUGIN_VERSION !== nextVersion) {
+        server.env.TINYAI_OBS_PLUGIN_VERSION = nextVersion;
+        changed = true;
+      }
+      if (changed) updatedCount += 1;
+    }
+  }
+  if (updatedCount > 0) {
+    writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
+  }
+  return updatedCount;
+}
+
+function isTinyAiObservabilityServer(serverName, server) {
+  if (serverName === "tinyai-observability") return true;
+  const args = Array.isArray(server.args) ? server.args : [];
+  return args.some((value) => typeof value === "string" && value.includes("/.claude/plugins/cache/tinyai/observability/"));
+}
+
+function cleanupOldPluginCaches(cacheRoot, currentInstallPath) {
+  if (!existsSync(cacheRoot)) return [];
+  const currentName = basename(currentInstallPath);
+  const removed = [];
+  for (const entry of readdirSync(cacheRoot)) {
+    const path = join(cacheRoot, entry);
+    if (entry === currentName || path === currentInstallPath) continue;
+    rmSync(path, { recursive: true, force: true });
+    removed.push(path);
+  }
+  return removed;
 }
