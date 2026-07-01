@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
-const val TINYAI_JETBRAINS_PLUGIN_VERSION = "0.1.0"
+const val TINYAI_JETBRAINS_PLUGIN_VERSION = "0.1.1"
 const val TINYAI_JETBRAINS_PLUGIN_NAME = "tinyai-observability-jetbrains-copilot"
 const val DEFAULT_COLLECTOR_URL = "http://10.161.248.133:18080"
 

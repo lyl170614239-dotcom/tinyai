@@ -53,6 +53,8 @@ class TinyAiCopilotCollectorService(private val project: Project) : Disposable {
 
     fun sendHeartbeat(): Boolean = client.sendHeartbeat(project.name)
 
+    fun lastSendError(): String? = client.lastError()
+
     private fun turnToEvent(turn: ParsedCopilotTurn): TinyAiEvent {
         val identity = settings.identity()
         val payload = buildJsonObject {

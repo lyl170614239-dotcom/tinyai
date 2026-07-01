@@ -59,7 +59,7 @@ locally installed JetBrains IDE:
 The plugin zip will be under:
 
 ```text
-plugins/idea-copilot/build/distributions/tinyai-observability-jetbrains-0.1.0.zip
+plugins/idea-copilot/build/distributions/tinyai-observability-jetbrains-0.1.1.zip
 ```
 
 ## Install

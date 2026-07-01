@@ -14,12 +14,16 @@ import java.time.Duration
 class TinyAiCollectorClient(private val settings: TinyAiSettings) {
     private val log = Logger.getInstance(TinyAiCollectorClient::class.java)
     private val json = Json { encodeDefaults = false }
+    @Volatile
+    private var lastErrorMessage: String? = null
     private val httpClient = HttpClient.newBuilder()
+        .version(HttpClient.Version.HTTP_1_1)
         .connectTimeout(Duration.ofSeconds(5))
         .build()
 
     fun send(events: List<TinyAiEvent>): Boolean {
         if (events.isEmpty()) return true
+        lastErrorMessage = null
 
         val identity = settings.identity()
         val batch = TinyAiEventBatch(
@@ -40,6 +44,7 @@ class TinyAiCollectorClient(private val settings: TinyAiSettings) {
             val state = settings.state
             val requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create("${settings.normalizedCollectorUrl()}/api/v1/events/batch"))
+                .version(HttpClient.Version.HTTP_1_1)
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json.encodeToString(batch)))
@@ -52,14 +57,18 @@ class TinyAiCollectorClient(private val settings: TinyAiSettings) {
             if (response.statusCode() in 200..299) {
                 true
             } else {
-                log.warn("TinyAI collector returned HTTP ${response.statusCode()}: ${response.body()}")
+                lastErrorMessage = "HTTP ${response.statusCode()}: ${response.body()}"
+                log.warn("TinyAI collector returned $lastErrorMessage")
                 false
             }
         }.getOrElse { error ->
+            lastErrorMessage = error.message ?: error.javaClass.simpleName
             log.warn("Failed to send TinyAI events", error)
             false
         }
     }
+
+    fun lastError(): String? = lastErrorMessage
 
     fun sendHeartbeat(projectName: String?): Boolean {
         val identity = settings.identity()

@@ -38,11 +38,17 @@ class SendHeartbeatAction : AnAction(), DumbAware {
         val project = event.project ?: return
         ProgressManager.getInstance().run(object : Task.Backgroundable(project, "Sending TinyAI Heartbeat", false) {
             override fun run(indicator: ProgressIndicator) {
-                val ok = project.service<TinyAiCopilotCollectorService>().sendHeartbeat()
+                val collector = project.service<TinyAiCopilotCollectorService>()
+                val ok = collector.sendHeartbeat()
                 val message = if (ok) {
                     "TinyAI heartbeat uploaded."
                 } else {
-                    "TinyAI heartbeat failed. Check collector URL and IDE logs."
+                    val detail = collector.lastSendError()?.take(240)
+                    if (detail.isNullOrBlank()) {
+                        "TinyAI heartbeat failed. Check collector URL and IDE logs."
+                    } else {
+                        "TinyAI heartbeat failed: $detail"
+                    }
                 }
                 ApplicationManager.getApplication().invokeLater {
                     Messages.showInfoMessage(project, message, "TinyAI Observability")
