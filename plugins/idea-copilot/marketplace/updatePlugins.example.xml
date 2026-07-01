@@ -1,5 +1,5 @@
 <plugins>
-  <plugin id="com.tinyai.observability.idea" url="https://plugins.example.com/tinyai-observability-jetbrains-0.1.1.zip" version="0.1.1">
+  <plugin id="com.tinyai.observability.idea" url="https://plugins.example.com/tinyai-observability-jetbrains-0.1.2.zip" version="0.1.2">
     <idea-version since-build="252"/>
     <name>TinyAI Observability</name>
     <vendor>TinyAI</vendor>

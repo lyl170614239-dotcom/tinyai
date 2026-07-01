@@ -13,7 +13,7 @@ import java.time.Duration
 
 class TinyAiCollectorClient(private val settings: TinyAiSettings) {
     private val log = Logger.getInstance(TinyAiCollectorClient::class.java)
-    private val json = Json { encodeDefaults = false }
+    private val json = Json { encodeDefaults = true }
     @Volatile
     private var lastErrorMessage: String? = null
     private val httpClient = HttpClient.newBuilder()
