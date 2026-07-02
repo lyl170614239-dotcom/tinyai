@@ -49,6 +49,30 @@ data class TinyAiIdentity(
     val hostHash: String
 )
 
+@Serializable
+data class TinyAiBatchUploadResult(
+    val accepted: Int = 0,
+    val duplicates: Int = 0,
+    val failed: Int = 0,
+    @SerialName("task_count") val taskCount: Int = 0,
+    val events: List<TinyAiBatchEventResult> = emptyList(),
+    val queued: Boolean = false
+)
+
+@Serializable
+data class TinyAiBatchEventResult(
+    @SerialName("event_id") val eventId: String,
+    @SerialName("event_type") val eventType: String,
+    val status: String,
+    val reason: String? = null
+)
+
+data class TinyAiScanResult(
+    val turns: List<ParsedCopilotTurn>,
+    val filesScanned: Int,
+    val parseErrorCount: Int
+)
+
 data class ParsedCopilotTurn(
     val sessionId: String,
     val requestId: String,

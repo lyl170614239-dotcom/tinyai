@@ -710,6 +710,43 @@ class NormalizationTests(unittest.TestCase):
 
         self.assertEqual(normalized["spec_accesses"], [])
 
+    def test_idea_copilot_turn_snapshot_normalizes_like_copilot_turn(self):
+        payload = {
+            "schema_version": "copilot.turn_snapshot.v1",
+            "source": "idea-copilot-log",
+            "session_id": "idea-session",
+            "request_id": "idea-request",
+            "response_id": "idea-response",
+            "turn_index": 2,
+            "attempt": 1,
+            "started_at": "2026-07-02T01:00:00Z",
+            "completed_at": "2026-07-02T01:00:05Z",
+            "turn": {
+                "turn_index": 2,
+                "request_id": "idea-request",
+                "response_id": "idea-response",
+                "status": "completed",
+            },
+            "messages": [
+                {"role": "user", "text": "explain IDEA plugin", "source_key": "idea-request:user"},
+                {"role": "assistant", "text": "it scans local Copilot artifacts", "source_key": "idea-request:idea-response:assistant"},
+            ],
+            "request_usage": [],
+            "usage_totals": {},
+        }
+
+        normalized = normalize_event(self.event(tool="copilot", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(normalized["adapter"], "copilot_turn_snapshot_v1")
+        self.assertEqual(normalized["session"]["session_id"], "session-1")
+        self.assertEqual(normalized["session"]["external_session_id"], "idea-session")
+        self.assertEqual(normalized["turns"][0]["request_id"], "idea-request")
+        self.assertEqual(normalized["turns"][0]["response_id"], "idea-response")
+        self.assertEqual(
+            [(message["role"], message["content"]) for message in normalized["messages"]],
+            [("user", "explain IDEA plugin"), ("assistant", "it scans local Copilot artifacts")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,8 +13,10 @@ event shape and focuses on JetBrains-local Copilot evidence.
 - Sends `tool=copilot` plugin heartbeats to the TinyAI collector.
 - Scans likely JetBrains/Copilot local log locations every 30 seconds.
 - Lets users configure additional Copilot log roots in IDEA settings.
-- Uploads parsed log lines as `turn_snapshot` events when user/assistant pairs
-  can be inferred.
+- Uploads inferred turns as `turn_snapshot` events with
+  `schema_version=copilot.turn_snapshot.v1`.
+- Tracks stable per-turn signatures and collector acknowledgements so accepted
+  or duplicate events are not re-uploaded on later scans.
 
 ## Current Capture Scope
 
@@ -38,9 +40,19 @@ and any extra directories configured in:
 Settings | Tools | TinyAI Observability | Extra Copilot log roots
 ```
 
-Supported file names include files containing `copilot`, `github-copilot`,
-`chat`, `llm`, or `ai-assistant` with `.jsonl`, `.log`, `.txt`, or `.json`
-extensions.
+Supported sources include:
+
+- GitHub Copilot agent session Nitrite stores named
+  `copilot-agent-sessions-nitrite.db`.
+- Files containing `copilot`, `github-copilot`, `chat`, `llm`, or
+  `ai-assistant` with `.jsonl`, `.log`, `.txt`, or `.json` extensions.
+
+The collector-facing payload is intentionally aligned with the VS Code Copilot
+extension's `turn_snapshot` contract: stable session/request/response IDs,
+canonical `messages`, `turn`, `request_usage`, `usage_totals`, and source file
+metadata. The local capture path is different, so IDEA events may omit details
+that are not present in JetBrains-local artifacts, such as tool calls, token
+usage, or exact model names.
 
 ## Build
 
@@ -76,9 +88,10 @@ In IDEA:
 ## Notes
 
 - This is not a direct port of the VS Code extension. It is a JetBrains plugin
-  shell that speaks the same TinyAI collector protocol.
+  shell that speaks the same TinyAI collector protocol and normalizes into the
+  same Copilot turn timeline.
 - If IDEA/GitHub Copilot does not persist chat transcripts locally, the plugin
   can still send heartbeats but cannot reconstruct chat turns until a log source
   is configured or parser support is added for the real local format.
 - Once we collect real JetBrains Copilot log samples, add a precise parser in
-  `TinyAiCopilotLogScanner`.
+  `TinyAiCopilotLogParser` or the Nitrite reader in `TinyAiCopilotLogScanner`.
