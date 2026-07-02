@@ -31,10 +31,7 @@ class TinyAiSettingsConfigurable : Configurable {
             row("User ID") {
                 textField()
                     .bindText(state::userId)
-                    .comment("Optional. If empty, TinyAI uses email, then name.")
-            }
-            row("Email") {
-                textField().bindText(state::userEmail)
+                    .comment("Optional. If empty, TinyAI uses name.")
             }
             row("Team") {
                 textField().bindText(state::team)

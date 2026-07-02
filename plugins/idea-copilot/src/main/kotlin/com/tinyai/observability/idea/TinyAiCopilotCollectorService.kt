@@ -92,7 +92,6 @@ class TinyAiCopilotCollectorService(private val project: Project) : Disposable {
             sourceConfidence = "derived",
             username = identity.username,
             userId = identity.userId,
-            userEmail = identity.userEmail,
             userDisplayName = identity.userDisplayName,
             team = identity.team,
             machineId = identity.machineId,
