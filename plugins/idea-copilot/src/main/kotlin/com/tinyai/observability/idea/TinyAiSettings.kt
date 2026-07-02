@@ -14,13 +14,14 @@ class TinyAiSettings : PersistentStateComponent<TinyAiSettings.StateData> {
         var token: String = "",
         var userName: String = "",
         var userId: String = "",
-        var userEmail: String = "",
         var team: String = "",
         var extraLogRoots: String = "",
         var autoCaptureCopilotLogs: Boolean = true,
         var captureHistoryOnFirstScan: Boolean = true,
         var scanIntervalSeconds: Int = 30,
-        var cursors: MutableMap<String, Long> = mutableMapOf()
+        var cursors: MutableMap<String, Long> = mutableMapOf(),
+        var turnCaptureStates: MutableMap<String, TinyAiTurnCaptureState> = mutableMapOf(),
+        var lastScanDiagnostics: TinyAiScanDiagnostics = TinyAiScanDiagnostics()
     )
 
     private var stateData = StateData()
@@ -34,13 +35,11 @@ class TinyAiSettings : PersistentStateComponent<TinyAiSettings.StateData> {
     fun identity(): TinyAiIdentity {
         val machine = localMachineName()
         val name = cleanIdentity(stateData.userName) ?: System.getProperty("user.name") ?: "unknown"
-        val email = cleanIdentity(stateData.userEmail)
-        val userId = cleanIdentity(stateData.userId) ?: email ?: name
+        val userId = cleanIdentity(stateData.userId) ?: name
 
         return TinyAiIdentity(
             username = name,
             userId = userId,
-            userEmail = email,
             userDisplayName = name,
             team = cleanIdentity(stateData.team),
             machineId = machine,

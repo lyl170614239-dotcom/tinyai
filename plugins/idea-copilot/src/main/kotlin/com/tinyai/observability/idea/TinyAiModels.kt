@@ -15,7 +15,6 @@ data class TinyAiEventBatch(
     @SerialName("plugin_version") val pluginVersion: String,
     val username: String,
     @SerialName("user_id") val userId: String,
-    @SerialName("user_email") val userEmail: String? = null,
     @SerialName("user_display_name") val userDisplayName: String? = null,
     val team: String? = null,
     @SerialName("machine_id") val machineId: String? = null,
@@ -34,7 +33,6 @@ data class TinyAiEvent(
     @SerialName("source_confidence") val sourceConfidence: String = "derived",
     val username: String,
     @SerialName("user_id") val userId: String,
-    @SerialName("user_email") val userEmail: String? = null,
     @SerialName("user_display_name") val userDisplayName: String? = null,
     val team: String? = null,
     @SerialName("machine_id") val machineId: String? = null,
@@ -45,7 +43,6 @@ data class TinyAiEvent(
 data class TinyAiIdentity(
     val username: String,
     val userId: String,
-    val userEmail: String?,
     val userDisplayName: String?,
     val team: String?,
     val machineId: String,
@@ -57,9 +54,85 @@ data class ParsedCopilotTurn(
     val requestId: String,
     val responseId: String,
     val turnIndex: Int,
+    val attempt: Int = 1,
     val userText: String,
     val assistantText: String,
-    val occurredAt: String,
+    val startedAt: String,
+    val completedAt: String,
+    val model: String? = null,
+    val sourceKind: String,
     val sourceFile: String,
-    val sourceOffset: Long
+    val sourceOffset: Long,
+    val sourceMtimeMs: Long,
+    val sourceSizeBytes: Long,
+    val parserVersion: String
+) {
+    constructor(
+        sessionId: String,
+        requestId: String,
+        responseId: String,
+        turnIndex: Int,
+        userText: String,
+        assistantText: String,
+        occurredAt: String,
+        sourceFile: String,
+        sourceOffset: Long
+    ) : this(
+        sessionId = sessionId,
+        requestId = requestId,
+        responseId = responseId,
+        turnIndex = turnIndex,
+        attempt = 1,
+        userText = userText,
+        assistantText = assistantText,
+        startedAt = occurredAt,
+        completedAt = occurredAt,
+        model = null,
+        sourceKind = "jetbrains_copilot_log_heuristic",
+        sourceFile = sourceFile,
+        sourceOffset = sourceOffset,
+        sourceMtimeMs = 0,
+        sourceSizeBytes = 0,
+        parserVersion = "jetbrains-copilot-log-heuristic-v1"
+    )
+
+    val occurredAt: String
+        get() = completedAt
+
+    fun signature(): String = sha256Short(
+        listOf(
+            requestId,
+            responseId,
+            textHash(userText),
+            textHash(assistantText),
+            sourceKind,
+            sourceOffset.toString(),
+            parserVersion,
+            completedAt
+        ).joinToString(":")
+    )
+}
+
+data class TinyAiTurnCaptureState(
+    var eventId: String = "",
+    var signature: String = "",
+    var status: String = "queued",
+    var firstSeenAt: String = "",
+    var lastAttemptAt: String = "",
+    var acknowledgedAt: String? = null,
+    var errorCount: Int = 0,
+    var lastError: String? = null
+) {
+    fun isAcknowledged(candidateSignature: String): Boolean =
+        status == "acknowledged" && signature == candidateSignature
+}
+
+data class TinyAiScanDiagnostics(
+    var scannedAt: String = "",
+    var filesScanned: Int = 0,
+    var turnsParsed: Int = 0,
+    var turnsUploaded: Int = 0,
+    var parseErrorCount: Int = 0,
+    var uploadErrorCount: Int = 0,
+    var lastErrorCategory: String? = null
 )

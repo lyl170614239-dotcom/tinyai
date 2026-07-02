@@ -29,4 +29,46 @@ class TinyAiPayloadTest {
         assertEquals(false, isCollectorUploadAllowedForUrl("http://example.com", ""))
         assertEquals(true, isCollectorUploadAllowedForUrl("https://example.com", "token"))
     }
+
+    @Test
+    fun `turn signature changes when assistant text changes`() {
+        val first = parsedTurn(assistant = "first answer")
+        val second = parsedTurn(assistant = "second answer")
+        assertEquals(false, first.signature() == second.signature())
+    }
+
+    @Test
+    fun `acknowledged state with same signature is skipped`() {
+        val state = TinyAiTurnCaptureState(
+            eventId = "event-1",
+            signature = "sig-1",
+            status = "acknowledged",
+            firstSeenAt = "2026-07-02T00:00:00Z",
+            lastAttemptAt = "2026-07-02T00:00:00Z",
+            acknowledgedAt = "2026-07-02T00:00:01Z",
+            errorCount = 0,
+            lastError = null
+        )
+        assertEquals(true, state.isAcknowledged("sig-1"))
+        assertEquals(false, state.isAcknowledged("sig-2"))
+    }
+
+    private fun parsedTurn(assistant: String = "answer") = ParsedCopilotTurn(
+        sessionId = "session-1",
+        requestId = "request-1",
+        responseId = "response-1",
+        turnIndex = 1,
+        attempt = 1,
+        userText = "question",
+        assistantText = assistant,
+        startedAt = "2026-07-02T01:00:00Z",
+        completedAt = "2026-07-02T01:00:02Z",
+        model = null,
+        sourceKind = "jetbrains_copilot_log_heuristic",
+        sourceFile = "/tmp/copilot.log",
+        sourceOffset = 12,
+        sourceMtimeMs = 1000,
+        sourceSizeBytes = 2000,
+        parserVersion = "jetbrains-copilot-log-heuristic-v1"
+    )
 }
