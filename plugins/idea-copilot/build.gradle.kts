@@ -28,6 +28,10 @@ dependencies {
     implementation("com.h2database:h2:2.3.232")
     implementation("org.dizitart:nitrite:4.3.3")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation(kotlin("test"))
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.11.4")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.11.4")
 }
 
 intellijPlatform {
@@ -55,5 +59,13 @@ tasks {
 
     named("instrumentCode") {
         enabled = false
+    }
+
+    named("instrumentTestCode") {
+        enabled = false
+    }
+
+    test {
+        useJUnitPlatform()
     }
 }
