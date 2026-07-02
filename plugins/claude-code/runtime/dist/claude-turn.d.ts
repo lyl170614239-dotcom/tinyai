@@ -38,6 +38,7 @@ type ClaudeCodeChange = {
     file_path: string;
     lines_added: number;
     lines_deleted: number;
+    line_number_basis?: "absolute" | "relative";
     hunks: Array<{
         old_start: number;
         old_lines: number;

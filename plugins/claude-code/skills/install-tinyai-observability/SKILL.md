@@ -14,25 +14,12 @@ Default Git marketplace:
 https://github.com/lyl170614239-dotcom/tinyai.git
 ```
 
-Default branch:
-
-```text
-codex/plugin-marketplace
-```
-
 ## First install
 
 Run these commands:
 
 ```bash
-rm -rf /tmp/tinyai-observability-plugins
-git clone --depth 1 --branch codex/plugin-marketplace \
-  https://github.com/lyl170614239-dotcom/tinyai.git \
-  /tmp/tinyai-observability-plugins
-
-claude plugin validate /tmp/tinyai-observability-plugins/.claude-plugin/marketplace.json
-claude plugin validate /tmp/tinyai-observability-plugins/plugins/claude-code/.claude-plugin/plugin.json
-claude plugin marketplace add /tmp/tinyai-observability-plugins
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 claude plugin marketplace list
@@ -43,7 +30,7 @@ or stale cache, refresh the source first:
 
 ```bash
 claude plugin marketplace remove tinyai
-claude plugin marketplace add /tmp/tinyai-observability-plugins
+claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 claude plugin marketplace list
@@ -58,31 +45,28 @@ separate plugins; use `TINYAI_OBS_CLAUDE_*` keys here, not
 `TINYAI_OBS_CODEX_*`.
 
 1. Before asking anything, inspect the user's original install request. If the
-request already contains a clear name and/or email, treat that identity as
-confirmed and use it directly. Common examples:
+request already contains a clear name, treat that identity as confirmed and use
+it directly. Common examples:
 
 ```text
-我的姓名是张三，邮箱是 zhangsan@example.com
-姓名=张三 邮箱=zhangsan@example.com
-name=Zhang San email=zhangsan@example.com
+我的姓名是张三
+姓名=张三
+name=Zhang San
 ```
 
-If the request contains a clear name but no email, use the name and only ask
-whether an email should be added. If the identity is missing or ambiguous, read
-existing values:
+If the identity is missing or ambiguous, read existing values:
 
 ```bash
 env | grep '^TINYAI_OBS_USER_' || true
 env | grep '^TINYAI_OBS_CLAUDE_USER_' || true
 git config --global user.name || true
-git config --global user.email || true
 ```
 
 2. Only ask the user when the request did not provide a clear identity, or when
 the detected identity looks unreliable. The prompt should be short:
 
 ```text
-TinyAI 需要你的姓名用于监控台按人聚合。我检测到：姓名=<git user.name>，邮箱=<git user.email>。是否使用？如果不对，请告诉我正确姓名/邮箱。
+TinyAI 需要你的姓名用于监控台按人聚合。我检测到：姓名=<git user.name>。是否使用？如果不对，请告诉我正确姓名。
 ```
 
 3. Write the confirmed identity to the TinyAI env file. Keep unrelated env
@@ -97,19 +81,16 @@ cat >> "$TINYAI_ENV.tmp" <<'EOF'
 TINYAI_OBS_USER_NAME="<confirmed-name>"
 TINYAI_OBS_USER_DISPLAY_NAME="<confirmed-name>"
 TINYAI_OBS_USERNAME="<confirmed-name>"
-TINYAI_OBS_USER_EMAIL="<confirmed-email>"
-TINYAI_OBS_USER_ID="<confirmed-email-or-name>"
+TINYAI_OBS_USER_ID="<confirmed-name>"
 TINYAI_OBS_CLAUDE_USER_NAME="<confirmed-name>"
 TINYAI_OBS_CLAUDE_USER_DISPLAY_NAME="<confirmed-name>"
 TINYAI_OBS_CLAUDE_USERNAME="<confirmed-name>"
-TINYAI_OBS_CLAUDE_USER_EMAIL="<confirmed-email>"
-TINYAI_OBS_CLAUDE_USER_ID="<confirmed-email-or-name>"
+TINYAI_OBS_CLAUDE_USER_ID="<confirmed-name>"
 EOF
 mv "$TINYAI_ENV.tmp" "$TINYAI_ENV"
 ```
 
-If the email is unknown, omit both `TINYAI_OBS_USER_EMAIL` and
-`TINYAI_OBS_CLAUDE_USER_EMAIL`, then set both `TINYAI_OBS_USER_ID` and
+Do not collect or write email fields. Set both `TINYAI_OBS_USER_ID` and
 `TINYAI_OBS_CLAUDE_USER_ID` to the confirmed name. Do not leave the user as
 `user` or `unknown` unless the user explicitly refuses to provide a name.
 
@@ -158,8 +139,7 @@ def env(name, default=None):
     return value
 
 username = env("TINYAI_OBS_CLAUDE_USER_NAME") or env("TINYAI_OBS_USER_NAME") or env("TINYAI_OBS_USERNAME") or "unknown"
-email = env("TINYAI_OBS_CLAUDE_USER_EMAIL") or env("TINYAI_OBS_USER_EMAIL")
-user_id = env("TINYAI_OBS_CLAUDE_USER_ID") or env("TINYAI_OBS_USER_ID") or email or username
+user_id = env("TINYAI_OBS_CLAUDE_USER_ID") or env("TINYAI_OBS_USER_ID") or username
 display_name = env("TINYAI_OBS_CLAUDE_USER_DISPLAY_NAME") or env("TINYAI_OBS_USER_DISPLAY_NAME") or username
 machine = platform.node() or socket.gethostname() or "unknown"
 host_hash = hashlib.sha256(machine.encode("utf-8")).hexdigest()[:32]
@@ -171,7 +151,6 @@ payload = {
     "plugin_version": "install-smoke",
     "username": username,
     "user_id": user_id,
-    "user_email": email,
     "user_display_name": display_name,
     "machine_id": machine,
     "host_hash": host_hash,
@@ -186,7 +165,6 @@ payload = {
             "source_confidence": "direct",
             "username": username,
             "user_id": user_id,
-            "user_email": email,
             "user_display_name": display_name,
             "machine_id": machine,
             "host_hash": host_hash,

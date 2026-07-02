@@ -173,6 +173,7 @@ function parseUnifiedDiffDetails(diff, options = {}) {
                 file_path: filePath,
                 old_path: pendingOldPath,
                 sensitive: isSensitiveDiffPath(filePath),
+                line_number_basis: "absolute",
                 lines_added: 0,
                 lines_deleted: 0,
                 hunks: []
@@ -209,6 +210,7 @@ function parseUnifiedDiffDetails(diff, options = {}) {
     const filePaths = files.map((file) => file.file_path).filter(Boolean);
     return {
         snapshot_kind: "workspace_diff",
+        line_number_basis: "absolute",
         diff_hash: createHash("sha256").update(diff).digest("hex").slice(0, 32),
         include_text: includeText,
         truncated,
@@ -441,6 +443,7 @@ export async function currentDiffDetails(workspacePath, options = {}) {
     catch {
         return {
             snapshot_kind: "workspace_diff",
+            line_number_basis: "absolute",
             diff_hash: "",
             diff_raw: undefined,
             include_text: options.includeText ?? true,
@@ -517,15 +520,32 @@ export async function currentHead(workspacePath) {
         return undefined;
     }
 }
+async function commitIdentity(workspacePath, ref = "HEAD") {
+    try {
+        const raw = await git(workspacePath, ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", ref]);
+        const [authorName, authorEmail, committerName, committerEmail] = raw.split("\0");
+        return {
+            git_author_name: authorName || undefined,
+            git_author_email: authorEmail || undefined,
+            git_committer_name: committerName || undefined,
+            git_committer_email: committerEmail || undefined
+        };
+    }
+    catch {
+        return {};
+    }
+}
 export async function commitSnapshot(workspacePath, ref = "HEAD", options = {}) {
     try {
         const summary = parseNumstat(await git(workspacePath, ["show", "--numstat", "--format=", ref, "--", "."]));
         const attr = await attribution(workspacePath, options);
         const diffRaw = await git(workspacePath, ["show", "--unified=3", "--no-color", "--format=", ref, "--", "."], 30000);
         const diffDetails = parseUnifiedDiffDetails(diffRaw, { includeText: true, maxFiles: 1000, maxLinesPerFile: 20000 });
+        const identity = await commitIdentity(workspacePath, ref);
         return {
             ...summary,
             commit_sha: await git(workspacePath, ["rev-parse", ref]),
+            ...identity,
             branch: await currentBranch(workspacePath),
             snapshot_kind: "commit",
             diff_hash: diffDetails.diff_hash,
@@ -591,6 +611,7 @@ async function commitCount(workspacePath, range) {
 export async function pushSnapshot(workspacePath, options = {}) {
     const branch = await currentBranch(workspacePath);
     const headSha = await currentHead(workspacePath);
+    const identity = await commitIdentity(workspacePath, "HEAD");
     const attr = await attribution(workspacePath, options);
     const upstream = await upstreamRef(workspacePath);
     if (!upstream || !headSha) {
@@ -601,6 +622,7 @@ export async function pushSnapshot(workspacePath, options = {}) {
             file_paths: [],
             branch,
             head_sha: headSha,
+            ...identity,
             commit_count: 0,
             snapshot_kind: "push",
             ...attr,
@@ -619,6 +641,7 @@ export async function pushSnapshot(workspacePath, options = {}) {
             upstream_ref: upstream,
             base_sha: baseSha,
             head_sha: headSha,
+            ...identity,
             commit_count: await commitCount(workspacePath, range),
             snapshot_kind: "push",
             ...attr,
@@ -636,6 +659,7 @@ export async function pushSnapshot(workspacePath, options = {}) {
             branch,
             upstream_ref: upstream,
             head_sha: headSha,
+            ...identity,
             commit_count: 0,
             snapshot_kind: "push",
             ...attr,
@@ -651,7 +675,7 @@ export async function installGitHooks(workspacePath, options) {
     await mkdir(hooksDir, { recursive: true });
     const hookScript = fileURLToPath(new URL("./hook.js", import.meta.url));
     const envFile = options.envFile || process.env.TINYAI_OBS_ENV_FILE || DEFAULT_TINYAI_ENV_FILE;
-    const hookTool = process.env.TINYAI_OBS_GIT_HOOK_TOOL || "copilot";
+    const hookTool = process.env.TINYAI_OBS_GIT_HOOK_TOOL || "git";
     const fallbackUrls = (options.fallbackUrls && options.fallbackUrls.length > 0 ? options.fallbackUrls : tinyAiCollectorFallbackUrlsForTool(options.tool, workspacePath)).filter(Boolean);
     const fallbackEnv = fallbackUrls.length > 0 ? fallbackUrls.join(",") : process.env.TINYAI_OBS_COLLECTOR_URLS;
     const setupLines = [

@@ -18,6 +18,8 @@ export declare function loadTinyAiEnvFile(workspacePath?: string): {
     exists: boolean;
 };
 export declare function tinyAiEnvValue(key: string, workspacePath?: string): string | undefined;
+export declare function tinyAiBooleanEnvValue(key: string, defaultValue: boolean, workspacePath?: string): boolean;
+export declare function tinyAiAutoInstallGitHooksEnabled(workspacePath?: string): boolean;
 export declare function tinyAiToolEnvValue(tool: TinyAiToolName | undefined, suffix: string, workspacePath?: string): string | undefined;
 export declare function splitTinyAiUrls(value: string | undefined): string[];
 export declare function tinyAiCollectorUrl(workspacePath?: string): string;

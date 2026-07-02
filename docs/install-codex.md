@@ -21,7 +21,7 @@ Code/Copilot extension unless the user explicitly asks for them too.
 - Marketplace name: `tinyai`
 - Plugin name: `observability`
 - Install name: `observability@tinyai`
-- Current version: `0.1.6+codex.20260701000000`
+- Current version: `0.1.9+codex.20260702115159`
 - Plugin path in this branch: `plugins/codex/plugins/observability`
 - Root marketplace manifest: `.agents/plugins/marketplace.json`
 
@@ -81,7 +81,7 @@ If the user only provides a name, omit the email keys and use the name as
 Before claiming success:
 
 1. `codex plugin list` shows `observability@tinyai` installed and enabled.
-2. The installed version is `0.1.6+codex.20260701000000`.
+2. The installed version is `0.1.9+codex.20260702115159`.
 3. The TinyAI collector health endpoint is reachable.
 4. A `plugin_heartbeat` smoke event with `tool=codex` is accepted.
 

@@ -24,12 +24,14 @@ export interface DiffDetailFile {
     old_path?: string;
     sensitive: boolean;
     binary?: boolean;
+    line_number_basis: "absolute";
     lines_added: number;
     lines_deleted: number;
     hunks: DiffDetailHunk[];
 }
 export interface GitDiffDetails extends GitDiffSummary {
     snapshot_kind: "workspace_diff";
+    line_number_basis: "absolute";
     diff_hash: string;
     diff_raw?: string;
     include_text: boolean;
@@ -71,6 +73,10 @@ export interface AiLineEvidence {
 }
 export interface GitCommitSnapshot extends GitDiffSummary {
     commit_sha?: string;
+    git_author_name?: string;
+    git_author_email?: string;
+    git_committer_name?: string;
+    git_committer_email?: string;
     branch?: string;
     snapshot_kind: "commit";
     diff_hash?: string;
@@ -100,6 +106,10 @@ export interface GitPushSnapshot extends GitDiffSummary {
     upstream_ref?: string;
     base_sha?: string;
     head_sha?: string;
+    git_author_name?: string;
+    git_author_email?: string;
+    git_committer_name?: string;
+    git_committer_email?: string;
     commit_count: number;
     snapshot_kind: "push";
     ai_assisted: boolean;

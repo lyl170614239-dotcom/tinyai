@@ -10,7 +10,6 @@ one person in the collector:
 
 ```bash
 export TINYAI_OBS_USER_NAME="张三"
-export TINYAI_OBS_USER_EMAIL="zhangsan@example.com" # optional
 export TINYAI_OBS_TEAM="hotel"                      # optional
 ```
 

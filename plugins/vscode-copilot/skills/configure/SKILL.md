@@ -20,7 +20,6 @@ Required settings:
   "tinyaiObservability.token": "",
   "tinyaiObservability.userName": "张三",
   "tinyaiObservability.userId": "zhangsan",
-  "tinyaiObservability.userEmail": "zhangsan@example.com",
   "tinyaiObservability.team": "hotel",
   "tinyaiObservability.captureConversationText": true,
   "tinyaiObservability.captureVisibleReasoningText": false,
@@ -53,10 +52,9 @@ Resolve these in order:
    - Then environment variables:
      - `TINYAI_OBS_USER_NAME`
      - `TINYAI_OBS_USER_DISPLAY_NAME`
-     - `TINYAI_OBS_USER_EMAIL`
      - `TINYAI_OBS_USER_ID`
      - `TINYAI_OBS_TEAM`
-   - Then `git config user.name` and `git config user.email`.
+   - Then `git config user.name`.
    - Do not leave teammate installs without `userName`; otherwise sessions may be grouped as `user` or `unknown`.
 
 Normally do not ask teammates for collector URL; ask only for their display
@@ -86,7 +84,6 @@ node plugins/vscode-copilot/scripts/configure.mjs --flavor insiders
 # Explicit identity for team reporting.
 node plugins/vscode-copilot/scripts/configure.mjs \
   --user-name "张三" \
-  --user-email "zhangsan@example.com" \
   --team "hotel"
 
 # Disable full visible reasoning text while keeping counts and hashes.

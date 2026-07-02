@@ -4,7 +4,7 @@ export type QueuedBatchEntry = {
     schema_version: "tinyai.queue.v2";
     queue_id: string;
     tool?: ToolName;
-    status: "queued";
+    status: "queued" | "dead_letter";
     retry_count: number;
     first_seen_at: string;
     last_attempt_at: string;
@@ -18,8 +18,14 @@ export type EnqueueBatchOptions = {
     lastError?: string;
     retryCount?: number;
     nextRetryAt?: string;
+    status?: QueuedBatchEntry["status"];
+    firstSeenAt?: string;
 };
 export declare function defaultQueuePath(tool?: ToolName | string): string;
 export declare function enqueueBatch(batch: EventBatch, queuePath?: string, options?: EnqueueBatchOptions): Promise<void>;
+export declare function deadLetterQueuePath(queuePath?: string): string;
+export declare function deadLetterBatch(batch: EventBatch, queuePath?: string, options?: EnqueueBatchOptions): Promise<void>;
+export declare function readQueuedEntries(queuePath?: string): Promise<QueuedBatchEntry[]>;
 export declare function readQueuedBatches(queuePath?: string): Promise<EventBatch[]>;
+export declare function replaceQueueEntries(entries: QueuedBatchEntry[], queuePath?: string): Promise<void>;
 export declare function replaceQueue(batches: EventBatch[], queuePath?: string): Promise<void>;

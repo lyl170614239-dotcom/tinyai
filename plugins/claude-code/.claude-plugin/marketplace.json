@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "TinyAI observability plugin marketplace for Claude Code.",
-    "version": "0.1.15"
+    "version": "0.1.16"
   },
   "plugins": [
     {
       "name": "observability",
       "source": "./",
       "description": "Capture Claude Code task telemetry, conversation snapshots, specs reads, feedback, and code adoption signals.",
-      "version": "0.1.15",
+      "version": "0.1.16",
       "author": {
         "name": "TinyAI"
       },

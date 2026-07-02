@@ -20,7 +20,7 @@ Codex plugins unless the user explicitly asks for them too.
 
 - Extension package path: `plugins/vscode-copilot`
 - Extension package name: `tinyai-observability-copilot`
-- Current version: `0.1.47`
+- Current version: `0.1.50`
 
 ## Install Flow
 
@@ -70,7 +70,7 @@ TINYAI_OBS_USER_ID=<email-or-name>
 
 Before claiming success:
 
-1. VS Code/Cursor shows TinyAI Observability version `0.1.47`.
+1. VS Code/Cursor shows TinyAI Observability version `0.1.50`.
 2. TinyAI collector health is reachable.
 3. A `plugin_heartbeat` or captured Copilot turn with `tool=copilot` is accepted.
 4. The extension is configured to auto-capture Copilot local transcripts if the

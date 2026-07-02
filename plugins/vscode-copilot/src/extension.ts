@@ -7,6 +7,7 @@ import { basename, dirname, join } from "node:path";
 import {
   CollectorClient,
   captureLatestClaudeTurnSnapshots,
+  claudeWorkspaceDiffPathCandidates,
   clientId,
   classifySpecPath,
   commitSnapshot,
@@ -26,6 +27,7 @@ import {
   replayCopilotChatSessionState,
   searchSpecs,
   stableEventId,
+  hasClaudeExternalWriteSignal,
   type ObservabilityEvent,
   type BatchUploadResult,
   type ClaudeTurnSnapshot,
@@ -36,6 +38,7 @@ import {
   loadTinyAiEnvFile,
   parseCopilotRequestUsage,
   type RequestUsage,
+  tinyAiAutoInstallGitHooksEnabled,
   tinyAiCollectorFallbackUrlsForTool,
   tinyAiDashboardFallbackUrlsForTool,
   tinyAiToolEnvValue,
@@ -106,6 +109,7 @@ type CodeEditRecord = {
   sensitive: boolean;
   lines_added: number;
   lines_deleted: number;
+  line_number_basis?: "absolute" | "relative";
   hunks: Array<{
     old_start: number;
     old_lines: number;
@@ -217,6 +221,7 @@ const LEGACY_DEFAULT_COLLECTOR_URLS = new Set([
   "http://10.161.248.127:18080/"
 ]);
 let lastCopilotCaptureDiagnostics: Record<string, unknown> | undefined;
+const QUEUE_FLUSH_TOOLS: ObservabilityEvent["tool"][] = ["copilot", "claude", "codex", "git"];
 
 function workspacePath(): string {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
@@ -239,7 +244,6 @@ function config() {
     token: tinyAiToolEnvValue("copilot", "TOKEN", workspacePath()) || cfg.get<string>("token") || "",
     userName: cfg.get<string>("userName")?.trim() || tinyAiToolEnvValue("copilot", "USER_NAME", workspacePath()) || "",
     userId: cfg.get<string>("userId")?.trim() || tinyAiToolEnvValue("copilot", "USER_ID", workspacePath()) || "",
-    userEmail: cfg.get<string>("userEmail")?.trim() || tinyAiToolEnvValue("copilot", "USER_EMAIL", workspacePath()) || "",
     team: cfg.get<string>("team")?.trim() || tinyAiToolEnvValue("copilot", "TEAM", workspacePath()) || "",
     captureConversationText: cfg.get<boolean>("captureConversationText") ?? true,
     captureVisibleReasoningText: cfg.get<boolean>("captureVisibleReasoningText") ?? false,
@@ -247,8 +251,9 @@ function config() {
     autoCaptureClaudeLocalTranscripts: cfg.get<boolean>("autoCaptureClaudeLocalTranscripts") ?? true,
     autoCaptureCopilotCodeChanges: cfg.get<boolean>("autoCaptureCopilotCodeChanges") ?? true,
     enableClaudeWorkspaceDiffFallback: cfg.get<boolean>("enableClaudeWorkspaceDiffFallback") ?? false,
-    autoInstallGitHooks: cfg.get<boolean>("autoInstallGitHooks") ?? true,
-    autoCaptureRecentMinutes: cfg.get<number>("autoCaptureRecentMinutes") ?? 30
+    autoInstallGitHooks: (cfg.get<boolean>("autoInstallGitHooks") ?? true) && tinyAiAutoInstallGitHooksEnabled(workspacePath()),
+    autoCaptureRecentMinutes: cfg.get<number>("autoCaptureRecentMinutes") ?? 30,
+    queueFlushIntervalSeconds: cfg.get<number>("queueFlushIntervalSeconds") ?? 30
   };
 }
 
@@ -260,10 +265,11 @@ async function migrateLegacyCollectorUrl() {
   }
 }
 
-const PLUGIN_VERSION = "0.1.47";
+const PLUGIN_VERSION = "0.1.50";
 
 function pluginNameForTool(tool: ObservabilityEvent["tool"]): string {
   if (tool === "codex") return "tinyai-observability-codex";
+  if (tool === "git") return "tinyai-observability-git-hook";
   return "tinyai-observability-vscode";
 }
 
@@ -299,15 +305,12 @@ function slugIdentity(value: string): string {
 function userIdentity(): Partial<UserIdentity> {
   const cfg = config();
   const gitName = gitConfigValue("user.name");
-  const gitEmail = gitConfigValue("user.email");
   const displayName = cfg.userName || process.env.TINYAI_OBS_USER_NAME || process.env.TINYAI_OBS_USER_DISPLAY_NAME || gitName || "";
-  const email = cfg.userEmail || process.env.TINYAI_OBS_USER_EMAIL || gitEmail || "";
-  const userId = cfg.userId || process.env.TINYAI_OBS_USER_ID || email || (displayName ? slugIdentity(displayName) : "");
+  const userId = cfg.userId || process.env.TINYAI_OBS_USER_ID || (displayName ? slugIdentity(displayName) : "");
   const host = hostname();
   return {
     username: displayName || process.env.USER || process.env.USERNAME || "unknown",
     user_id: userId || undefined,
-    user_email: email || undefined,
     user_display_name: displayName || undefined,
     team: cfg.team || process.env.TINYAI_OBS_TEAM || undefined,
     machine_id: vscode.env.machineId ? hashText(vscode.env.machineId) : undefined,
@@ -332,7 +335,7 @@ function eventForTask(
   sourceConfidence: SourceConfidence = "direct",
   eventId?: string,
   model?: string,
-  tool: "copilot" | "claude" = "copilot",
+  tool: ObservabilityEvent["tool"] = "copilot",
   eventWorkspacePath = workspacePath()
 ) {
   const payloadSessionId = payload.session_id || payload.sessionId;
@@ -497,6 +500,7 @@ function codeEditFromReplacement(
     sensitive: isSensitiveCodePath(filePath),
     lines_added: added.length,
     lines_deleted: removed.length,
+    line_number_basis: "relative",
     source,
     tool_name: toolName,
     hunks: [
@@ -532,6 +536,7 @@ function codeEditsFromApplyPatch(patchInput: unknown, source: string, toolName?:
         sensitive: isSensitiveCodePath(filePath),
         lines_added: 0,
         lines_deleted: 0,
+        line_number_basis: rawLine.startsWith("*** Add File: ") ? "absolute" : "relative",
         source,
         tool_name: toolName || "apply_patch",
         hunks: [{ old_start: 1, old_lines: 0, new_start: 1, new_lines: 0, lines: [] }]
@@ -542,6 +547,14 @@ function codeEditsFromApplyPatch(patchInput: unknown, source: string, toolName?:
     }
     if (!current) continue;
     if (rawLine.startsWith("@@")) {
+      const hunkMatch = rawLine.match(/^@@(?:\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?)?/);
+      if (hunkMatch?.[1]) {
+        oldLine = Number(hunkMatch[1]);
+        newLine = Number(hunkMatch[2] || 1);
+        current.line_number_basis = "absolute";
+      } else if (current.line_number_basis !== "absolute") {
+        current.line_number_basis = "relative";
+      }
       const hunk = { old_start: oldLine, old_lines: 0, new_start: newLine, new_lines: 0, lines: [] as CodeEditRecord["hunks"][number]["lines"] };
       current.hunks.push(hunk);
       continue;
@@ -730,6 +743,7 @@ function editorDeltaFiles(entries: BufferedEditorChange[]) {
       lines_deleted: number;
       change_count: number;
       changes: Array<Record<string, unknown>>;
+      line_number_basis: "absolute";
       source: string;
       first_occurred_at: string;
       last_occurred_at: string;
@@ -747,6 +761,7 @@ function editorDeltaFiles(entries: BufferedEditorChange[]) {
         lines_deleted: 0,
         change_count: 0,
         changes: [],
+        line_number_basis: "absolute",
         source: "vscode_text_change_buffer",
         first_occurred_at: entry.occurred_at,
         last_occurred_at: entry.occurred_at
@@ -1027,33 +1042,57 @@ function activeEditorRelativePath(): string | undefined {
   return normalizeTurnDiffPath(vscode.workspace.asRelativePath(editor.document.uri, false));
 }
 
-function hasExternalFileWriteSignal(snapshot: {
-  user_message?: unknown;
-  assistant_message?: unknown;
-  process_steps?: unknown;
-  tool_calls?: unknown;
-}): boolean {
-  const haystack = JSON.stringify({
-    user: snapshot.user_message,
-    assistant: snapshot.assistant_message,
-    steps: snapshot.process_steps,
-    tools: snapshot.tool_calls
-  }).toLowerCase();
-  return /(run_in_terminal|terminal|shell|bash|zsh|python\d?|node|ruby|perl|执行命令|运行命令|脚本|写入文件|追加)/i.test(haystack);
+const COPILOT_EDIT_TOOL_RE =
+  /(?:replace_string_in_file|multi_replace_string_in_file|create_file|insert_edit|write_file|edit_file|apply_patch)/i;
+const COPILOT_TERMINAL_TOOL_RE = /(?:run_in_terminal|terminal|shell|bash|zsh|powershell|cmd)/i;
+const COPILOT_TERMINAL_WRITE_RE =
+  /(?:write_text|writefilesync|writefile|appendfile|open\s*\([^)]*['"]w|(?<![0-9])>>|(?<![0-9])>\s*[^&]|\btee\s+|\bsed\s+-i\b|\bperl\s+-pi\b|\btouch\s+|\bcp\s+|\bmv\s+|\brm\s+)/i;
+
+function terminalTextFromUnknown(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(terminalTextFromUnknown).filter(Boolean).join("\n");
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).map(terminalTextFromUnknown).filter(Boolean).join("\n");
+  }
+  return "";
 }
 
-function turnWorkspaceDiffPaths(
+function copilotToolName(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  return readableValue(record.tool_name || record.toolName || record.toolId || record.name || "");
+}
+
+function isCopilotWriteToolCall(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  const toolName = copilotToolName(record);
+  if (COPILOT_EDIT_TOOL_RE.test(toolName)) return true;
+  if (!COPILOT_TERMINAL_TOOL_RE.test(toolName)) return false;
+  return COPILOT_TERMINAL_WRITE_RE.test(terminalTextFromUnknown(record.arguments_raw ?? record.arguments ?? record.input ?? record.command ?? ""));
+}
+
+function copilotWriteToolCalls(snapshot: { tool_calls?: unknown }): unknown[] {
+  const calls = Array.isArray(snapshot.tool_calls) ? snapshot.tool_calls : [];
+  return calls.filter(isCopilotWriteToolCall);
+}
+
+function hasWorkspaceDiffBaselineForTurn(): boolean {
+  // The local transcript poller sees Copilot/Claude turns after completion. Without a
+  // turn-start diff baseline, current workspace diff can include older uncommitted work.
+  return false;
+}
+
+function copilotTurnWorkspaceDiffPaths(
   snapshot: {
-    user_message?: unknown;
-    assistant_message?: unknown;
-    process_steps?: unknown;
     tool_calls?: unknown;
-    sub_agents?: unknown;
     code_changes?: unknown;
   },
   toolFiles: Array<{ file_path: string }>,
   editorFiles: Array<{ file_path: string }>,
   editorEntries: BufferedEditorChange[],
+  writeToolCalls: unknown[],
   rootPath = workspacePath()
 ): string[] {
   const paths = new Set<string>();
@@ -1065,11 +1104,7 @@ function turnWorkspaceDiffPaths(
     const normalized = typeof entry.payload.file_path === "string" ? normalizeTurnDiffPath(entry.payload.file_path, rootPath) : undefined;
     if (normalized) paths.add(normalized);
   }
-  collectCodePathsFromUnknown(snapshot.user_message, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.assistant_message, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.process_steps, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.tool_calls, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.sub_agents, paths, rootPath);
+  collectCodePathsFromUnknown(writeToolCalls, paths, rootPath);
   collectCodePathsFromUnknown(snapshot.code_changes, paths, rootPath);
   return [...paths].slice(0, 50);
 }
@@ -1082,13 +1117,33 @@ function codeEditsFromCopilotTurn(snapshot: CopilotTurnSnapshot): CodeEditRecord
   return dedupeCodeEdits(edits);
 }
 
+async function editorFilesWithCurrentWorkspaceDiff(files: ReturnType<typeof editorDeltaFiles>) {
+  if (!files.length) return [];
+  const pathByNormalized = new Map<string, (typeof files)[number]>();
+  for (const file of files) {
+    const normalized = normalizeTurnDiffPath(file.file_path);
+    if (normalized) pathByNormalized.set(normalized, file);
+  }
+  if (pathByNormalized.size === 0) return [];
+  const diff = await currentDiffDetails(workspacePath(), {
+    includeText: false,
+    includeUntracked: true,
+    maxFiles: 100,
+    maxLinesPerFile: 0,
+    paths: [...pathByNormalized.keys()]
+  });
+  const changedPaths = new Set((diff.file_paths || []).map((path) => normalizeTurnDiffPath(path)).filter(Boolean));
+  return [...pathByNormalized.entries()]
+    .filter(([path]) => changedPaths.has(path))
+    .map(([, file]) => file);
+}
+
 async function recordCopilotTurnEditorDelta(snapshot: CopilotTurnSnapshot, taskId: string, turnClientId: string) {
   if (!config().autoCaptureCopilotCodeChanges) return;
   const toolFiles = codeEditsFromCopilotTurn(snapshot);
-  const toolPaths = new Set(toolFiles.map((file) => file.file_path));
   const editorEntries = bufferedEditorChangesForTurn(snapshot);
-  const editorFiles = editorDeltaFiles(editorEntries).filter((file) => !toolPaths.has(file.file_path));
-  const files = [...toolFiles, ...editorFiles];
+  const editorFiles = await editorFilesWithCurrentWorkspaceDiff(editorDeltaFiles(editorEntries));
+  const files = editorFiles;
   if (files.length > 0) {
     const linesAdded = files.reduce((sum, file) => sum + Number(file.lines_added || 0), 0);
     const linesDeleted = files.reduce((sum, file) => sum + Number(file.lines_deleted || 0), 0);
@@ -1108,8 +1163,8 @@ async function recordCopilotTurnEditorDelta(snapshot: CopilotTurnSnapshot, taskI
         trigger: "auto_copilot_turn_completed",
         attribution_scope: "turn_delta",
         ai_assisted: true,
-        attribution_evidence: "copilot_turn_tool_calls_or_vscode_editor_changes",
-        capture_strategy: toolFiles.length > 0 && editorFiles.length > 0 ? "tool_call_delta+editor_delta" : toolFiles.length > 0 ? "tool_call_delta" : "editor_delta",
+        attribution_evidence: "vscode_editor_changes_with_current_workspace_diff",
+        capture_strategy: "editor_delta_confirmed_by_workspace_diff",
         files_changed: files.length,
         lines_added: linesAdded,
         lines_deleted: linesDeleted,
@@ -1118,7 +1173,7 @@ async function recordCopilotTurnEditorDelta(snapshot: CopilotTurnSnapshot, taskI
         file_paths: files.map((file) => file.file_path).slice(0, 100),
         files,
         capture_note:
-          "Per-turn code delta captured from Copilot tool-call edit payloads and VS Code text document change events within the request/response time window. This intentionally excludes pre-existing workspace git diff."
+          "Per-turn code delta captured from VS Code text document changes within the request/response time window, only for files that still have current workspace diff. Copilot tool-call patches are used only as attribution/path hints because users can undo or reject them."
       },
       "derived",
       stableEventId(
@@ -1138,8 +1193,11 @@ async function recordCopilotTurnWorkspaceDiffFallback(
   editorFiles: Array<{ file_path: string }>,
   editorEntries: BufferedEditorChange[]
 ) {
-  if (!hasExternalFileWriteSignal(snapshot)) return;
-  const paths = turnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries);
+  const writeToolCalls = copilotWriteToolCalls(snapshot);
+  if (!writeToolCalls.length) return;
+  if (!hasWorkspaceDiffBaselineForTurn()) return;
+  if (!toolFiles.length && !editorFiles.length && !editorEntries.length) return;
+  const paths = copilotTurnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries, writeToolCalls);
   if (paths.length === 0) return;
   const diff = await currentDiffDetails(workspacePath(), {
     includeText: true,
@@ -1196,15 +1254,20 @@ async function recordCopilotTurnWorkspaceDiffFallback(
 }
 
 function codeEditsFromClaudeTurn(snapshot: ClaudeTurnSnapshot): CodeEditRecord[] {
-  const edits = (snapshot.code_changes || []).map((change) => ({
-    file_path: displayPath(String(change.file_path || "")),
-    sensitive: isSensitiveCodePath(String(change.file_path || "")),
-    lines_added: Number(change.lines_added || 0),
-    lines_deleted: Number(change.lines_deleted || 0),
-    hunks: Array.isArray(change.hunks) ? change.hunks as CodeEditRecord["hunks"] : [],
-    source: "claude_turn_tool_patch",
-    tool_name: change.tool_name
-  })).filter((change) => change.file_path && (change.lines_added > 0 || change.lines_deleted > 0 || change.hunks.length > 0));
+  const edits: CodeEditRecord[] = (snapshot.code_changes || []).map((change) => {
+    const basis: CodeEditRecord["line_number_basis"] =
+      change.line_number_basis === "absolute" ? "absolute" : change.line_number_basis === "relative" ? "relative" : undefined;
+    return {
+      file_path: displayPath(String(change.file_path || "")),
+      sensitive: isSensitiveCodePath(String(change.file_path || "")),
+      lines_added: Number(change.lines_added || 0),
+      lines_deleted: Number(change.lines_deleted || 0),
+      hunks: Array.isArray(change.hunks) ? change.hunks as CodeEditRecord["hunks"] : [],
+      line_number_basis: basis,
+      source: "claude_turn_tool_patch",
+      tool_name: change.tool_name
+    };
+  }).filter((change) => change.file_path && (change.lines_added > 0 || change.lines_deleted > 0 || change.hunks.length > 0));
   return dedupeCodeEdits(edits);
 }
 
@@ -1273,16 +1336,30 @@ async function recordClaudeTurnWorkspaceDiffFallback(
   editorFiles: Array<{ file_path: string }>,
   editorEntries: BufferedEditorChange[]
 ) {
-  if (!hasExternalFileWriteSignal(snapshot)) return;
+  if (!hasClaudeExternalWriteSignal(snapshot)) return;
+  if (!hasWorkspaceDiffBaselineForTurn()) return;
   const cwd = snapshot.cwd || workspacePath();
-  const paths = turnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries, cwd);
-  if (paths.length === 0) return;
+  const paths = new Set<string>();
+  for (const path of claudeWorkspaceDiffPathCandidates(snapshot)) {
+    const normalized = normalizeTurnDiffPath(path, cwd);
+    if (normalized) paths.add(normalized);
+  }
+  for (const file of [...toolFiles, ...editorFiles]) {
+    const normalized = normalizeTurnDiffPath(file.file_path, cwd);
+    if (normalized) paths.add(normalized);
+  }
+  for (const entry of editorEntries) {
+    const normalized = typeof entry.payload.file_path === "string" ? normalizeTurnDiffPath(entry.payload.file_path, cwd) : undefined;
+    if (normalized) paths.add(normalized);
+  }
+  const pathList = [...paths].slice(0, 50);
+  if (pathList.length === 0) return;
   const diff = await currentDiffDetails(cwd, {
     includeText: true,
     includeUntracked: true,
     maxFiles: 50,
     maxLinesPerFile: EDITOR_DELTA_INLINE_LINE_LIMIT + 1,
-    paths
+    paths: pathList
   });
   if (!diff.files.length || diff.lines_added + diff.lines_deleted === 0) return;
   const totalLines = diff.lines_added + diff.lines_deleted;
@@ -2640,6 +2717,16 @@ async function flush(): Promise<BatchUploadResult | undefined> {
   return merged;
 }
 
+async function flushDiskQueues() {
+  for (const tool of QUEUE_FLUSH_TOOLS) {
+    try {
+      await client(tool).flushQueue(tool);
+    } catch (error) {
+      console.warn(`TinyAI Observability failed to flush ${tool} queue`, error);
+    }
+  }
+}
+
 async function heartbeat() {
   const cfg = config();
   const identity = userIdentity();
@@ -2650,6 +2737,7 @@ async function heartbeat() {
       user_id: identity.user_id || identity.username,
       auto_capture: cfg.autoCaptureCopilotLocalTranscripts,
       auto_capture_claude: cfg.autoCaptureClaudeLocalTranscripts,
+      queue_flush_interval_seconds: cfg.queueFlushIntervalSeconds,
       capture_text: cfg.captureConversationText,
       capture_reasoning: cfg.captureVisibleReasoningText,
       recent_minutes: cfg.autoCaptureRecentMinutes
@@ -2662,6 +2750,7 @@ async function heartbeat() {
       activation: "vscode",
       auto_capture_copilot_local_transcripts: config().autoCaptureCopilotLocalTranscripts,
       auto_capture_claude_local_transcripts: config().autoCaptureClaudeLocalTranscripts,
+      queue_flush_interval_seconds: config().queueFlushIntervalSeconds,
       capture_conversation_text: config().captureConversationText,
       capture_visible_reasoning_text: config().captureVisibleReasoningText,
       auto_capture_recent_minutes: config().autoCaptureRecentMinutes,
@@ -2681,8 +2770,8 @@ function updateStatus() {
   statusBar.tooltip = currentTaskId
     ? `Current task: ${currentTaskId}`
     : cfg.autoCaptureCopilotLocalTranscripts || cfg.autoCaptureClaudeLocalTranscripts
-      ? `Auto-capturing recent Copilot/Claude sessions every 15s; window: ${cfg.autoCaptureRecentMinutes} min.`
-      : "TinyAI automatic transcript capture is disabled.";
+      ? `Auto-capturing recent Copilot/Claude sessions every 15s; queue flush every ${Math.max(5, cfg.queueFlushIntervalSeconds)}s; window: ${cfg.autoCaptureRecentMinutes} min.`
+      : `TinyAI transcript capture is disabled; queue flush still runs every ${Math.max(5, cfg.queueFlushIntervalSeconds)}s.`;
   statusBar.command = "tinyaiObservability.showMenu";
   panelProvider?.refresh();
 }
@@ -2929,17 +3018,20 @@ async function adoptionSnapshot() {
 }
 
 async function recordCommitSnapshot(options: { silent?: boolean } = {}) {
-  await ensureTask("commit_snapshot");
   const snapshot = await commitSnapshot(workspacePath(), "HEAD", {
     aiAssisted: true,
     attributionEvidence: "manual_vscode_commit_snapshot"
   });
-  event(
-    "commit_snapshot",
-    { ...snapshot, source: "vscode_command" },
-    "derived",
-    snapshot.commit_sha ? stableEventId(`copilot:commit_snapshot:${workspacePath()}:${snapshot.commit_sha}`) : undefined
-  );
+  pendingEvents.push(makeEvent({
+    tool: "git",
+    eventType: "commit_snapshot",
+    taskId: snapshot.commit_sha ? `commit-${snapshot.commit_sha.slice(0, 16)}` : undefined,
+    workspacePath: workspacePath(),
+    payload: { ...snapshot, source: "vscode_command", hook_tool: "git", hook_installer_tool: "copilot" },
+    sourceConfidence: "derived",
+    eventId: snapshot.commit_sha ? stableEventId(`git:commit_snapshot:${workspacePath()}:${snapshot.commit_sha}`) : undefined,
+    userIdentity: userIdentity()
+  }));
   updateStatus();
   await flush();
   if (!options.silent) {
@@ -2965,18 +3057,21 @@ async function recordAiLinesSnapshot(options: { silent?: boolean } = {}) {
 }
 
 async function recordPushSnapshot(options: { silent?: boolean } = {}) {
-  await ensureTask("push_snapshot");
   const snapshot = await pushSnapshot(workspacePath(), {
     aiAssisted: true,
     attributionEvidence: "manual_vscode_push_snapshot"
   });
   const rangeKey = snapshot.head_sha ? `${snapshot.upstream_ref || ""}:${snapshot.base_sha || ""}:${snapshot.head_sha}` : "";
-  event(
-    "push_snapshot",
-    { ...snapshot, source: "vscode_command" },
-    "derived",
-    rangeKey ? stableEventId(`copilot:push_snapshot:${workspacePath()}:${rangeKey}`) : undefined
-  );
+  pendingEvents.push(makeEvent({
+    tool: "git",
+    eventType: "push_snapshot",
+    taskId: snapshot.head_sha ? `push-${snapshot.head_sha.slice(0, 16)}` : undefined,
+    workspacePath: workspacePath(),
+    payload: { ...snapshot, source: "vscode_command", hook_tool: "git", hook_installer_tool: "copilot" },
+    sourceConfidence: "derived",
+    eventId: rangeKey ? stableEventId(`git:push_snapshot:${workspacePath()}:${rangeKey}`) : undefined,
+    userIdentity: userIdentity()
+  }));
   updateStatus();
   await flush();
   if (!options.silent) {
@@ -3060,8 +3155,8 @@ class ObservabilityPanelProvider implements vscode.WebviewViewProvider {
       cfg.autoCaptureClaudeLocalTranscripts ? "Claude" : undefined
     ].filter(Boolean).join(" / ");
     const autoText = enabledSources
-      ? `已开启，每 15 秒扫描最近 ${cfg.autoCaptureRecentMinutes} 分钟的 ${enabledSources} 本地会话。`
-      : "已关闭，可在设置里开启 autoCaptureCopilotLocalTranscripts 或 autoCaptureClaudeLocalTranscripts。";
+      ? `已开启，每 15 秒扫描最近 ${cfg.autoCaptureRecentMinutes} 分钟的 ${enabledSources} 本地会话；本地失败队列每 ${Math.max(5, cfg.queueFlushIntervalSeconds)} 秒独立补发。`
+      : `会话自动扫描已关闭；本地失败队列仍每 ${Math.max(5, cfg.queueFlushIntervalSeconds)} 秒独立补发。`;
     const collectorLabel = cfg.collectorUrl || DEFAULT_COLLECTOR_URL;
     return /* html */ `<!doctype html>
 <html lang="zh-CN">
@@ -3231,6 +3326,10 @@ export function activate(context: vscode.ExtensionContext) {
   });
   void remindMissingUserName(context);
   void heartbeat();
+  void flushDiskQueues();
+  const queueFlushIntervalMs = Math.max(5, config().queueFlushIntervalSeconds) * 1000;
+  const queueFlushTimer = setInterval(() => void flushDiskQueues(), queueFlushIntervalMs);
+  context.subscriptions.push({ dispose: () => clearInterval(queueFlushTimer) });
   if (config().autoInstallGitHooks) {
     void installGitHooksForWorkspace({ silent: true, emitHeartbeat: false });
   }

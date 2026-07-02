@@ -303,6 +303,7 @@ function diffFromReplacement(args, toolName, toolCallId, requestId, responseId, 
         file_path: filePath,
         lines_added: newLines.length,
         lines_deleted: oldLines.length,
+        line_number_basis: "relative",
         hunks: [
             {
                 old_start: 1,
