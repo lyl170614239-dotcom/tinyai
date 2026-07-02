@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=task_start TINYAI_OBS_PLUGIN_VERSION=0.1.15 TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=task_start TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
             "async": false
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=bash_pre_tool_use TINYAI_OBS_PLUGIN_VERSION=0.1.15 node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=bash_pre_tool_use node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
             "async": false
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=bash_post_tool_use TINYAI_OBS_PLUGIN_VERSION=0.1.15 node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=bash_post_tool_use node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
             "async": false
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=turn_snapshot TINYAI_OBS_PLUGIN_VERSION=0.1.15 TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true TINYAI_OBS_OUTPUT_TOKENS=\"${CLAUDE_CODE_OUTPUT_TOKENS:-}\" node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=turn_snapshot TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true TINYAI_OBS_OUTPUT_TOKENS=\"${CLAUDE_CODE_OUTPUT_TOKENS:-}\" node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
             "async": false
           }
         ]
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=turn_snapshot TINYAI_OBS_PLUGIN_VERSION=0.1.15 TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true TINYAI_OBS_OUTPUT_TOKENS=\"${CLAUDE_CODE_OUTPUT_TOKENS:-}\" node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
+            "command": "TINYAI_OBS_ENV_FILE=\"${TINYAI_OBS_ENV_FILE:-$HOME/.tinyai-observability/tinyai-observability.env}\"; [ -f \"$TINYAI_OBS_ENV_FILE\" ] && . \"$TINYAI_OBS_ENV_FILE\"; TINYAI_OBS_TOOL=claude TINYAI_OBS_EVENT_TYPE=turn_snapshot TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true TINYAI_OBS_OUTPUT_TOKENS=\"${CLAUDE_CODE_OUTPUT_TOKENS:-}\" node \"${CLAUDE_PLUGIN_ROOT}/runtime/dist/hook.js\"",
             "async": false
           }
         ]

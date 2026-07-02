@@ -30,7 +30,7 @@ if (!skipInstall) {
   run("claude", ["plugin", "marketplace", "update", marketplaceName], { dryRun, allowFailure: true });
   run("claude", ["plugin", "install", pluginId], { dryRun });
   if (!dryRun) {
-    cleanup = cleanupLocalClaudeConfig({ installPath, pluginVersion, marketplaceName, pluginName });
+    cleanup = cleanupLocalClaudeConfig({ installPath, marketplaceName, pluginName });
   }
 }
 
@@ -93,15 +93,15 @@ function run(command, commandArgs, options = {}) {
   }
 }
 
-function cleanupLocalClaudeConfig({ installPath, pluginVersion, marketplaceName, pluginName }) {
+function cleanupLocalClaudeConfig({ installPath, marketplaceName, pluginName }) {
   const claudeJsonPath = join(homedir(), ".claude.json");
-  const updatedClaudeJsonProjectMcpConfigs = updateClaudeProjectMcpConfigs(claudeJsonPath, installPath, pluginVersion);
+  const updatedClaudeJsonProjectMcpConfigs = updateClaudeProjectMcpConfigs(claudeJsonPath, installPath);
   const cacheRoot = join(homedir(), ".claude", "plugins", "cache", marketplaceName, pluginName);
   const cleanedOldCaches = cleanupOldPluginCaches(cacheRoot, installPath);
   return { cleanedOldCaches, updatedClaudeJsonProjectMcpConfigs };
 }
 
-function updateClaudeProjectMcpConfigs(path, nextInstallPath, nextVersion) {
+function updateClaudeProjectMcpConfigs(path, nextInstallPath) {
   if (!existsSync(path)) return 0;
   const root = JSON.parse(readFileSync(path, "utf8"));
   const projects = root.projects && typeof root.projects === "object" && !Array.isArray(root.projects) ? root.projects : {};
@@ -125,9 +125,15 @@ function updateClaudeProjectMcpConfigs(path, nextInstallPath, nextVersion) {
         changed = true;
       }
       if (!server.env || typeof server.env !== "object" || Array.isArray(server.env)) server.env = {};
-      if (server.env.TINYAI_OBS_PLUGIN_VERSION !== nextVersion) {
-        server.env.TINYAI_OBS_PLUGIN_VERSION = nextVersion;
-        changed = true;
+      for (const legacyEnvKey of [
+        "TINYAI_OBS_PLUGIN_VERSION",
+        "TINYAI_OBS_USER_EMAIL",
+        "TINYAI_OBS_CLAUDE_USER_EMAIL"
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(server.env, legacyEnvKey)) {
+          delete server.env[legacyEnvKey];
+          changed = true;
+        }
       }
       if (changed) updatedCount += 1;
     }

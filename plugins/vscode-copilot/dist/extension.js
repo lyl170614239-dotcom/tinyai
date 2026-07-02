@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash as createHash6, randomUUID as randomUUID2 } from "node:crypto";
 import { mkdir as mkdir3, open as open2, readdir as readdir3, readFile as readFile5, stat as stat3, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir3, hostname } from "node:os";
-import { basename as basename2, dirname as dirname3, join as join5 } from "node:path";
+import { basename as basename2, dirname as dirname4, join as join6 } from "node:path";
 
 // ../../plugin-runtime/dist/client.js
 import { createHash as createHash2 } from "node:crypto";
@@ -106,6 +106,15 @@ function loadTinyAiEnvFile(workspacePath2) {
 function tinyAiEnvValue(key, workspacePath2) {
   return cleanConfiguredValue(process.env[key]) || cleanConfiguredValue(readTinyAiEnvFile(workspacePath2).values[key]);
 }
+function tinyAiBooleanEnvValue(key, defaultValue, workspacePath2) {
+  const value = tinyAiEnvValue(key, workspacePath2);
+  if (value === void 0)
+    return defaultValue;
+  return !["0", "false", "no", "off"].includes(value.toLowerCase());
+}
+function tinyAiAutoInstallGitHooksEnabled(workspacePath2) {
+  return tinyAiBooleanEnvValue("TINYAI_OBS_AUTO_INSTALL_GIT_HOOKS", true, workspacePath2);
+}
 function normalizeToolName(tool) {
   const normalized = String(tool || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return normalized || void 0;
@@ -157,7 +166,7 @@ function taskIdFromEnv() {
 }
 function clientId(tool, overrides = {}) {
   const identity = resolveUserIdentity(overrides);
-  const seed = `${tool}:${identity.user_id || identity.user_email || identity.user_display_name || identity.username}:${identity.machine_id || identity.host_hash || "local"}`;
+  const seed = `${tool}:${identity.user_id || identity.user_display_name || identity.username}:${identity.machine_id || identity.host_hash || "local"}`;
   return createHash("sha256").update(seed).digest("hex").slice(0, 32);
 }
 function resolveUsername() {
@@ -167,12 +176,23 @@ function clean(value) {
   const trimmed = value?.trim();
   return trimmed ? trimmed : void 0;
 }
+function usableUserId(value) {
+  const cleaned = clean(value);
+  if (!cleaned)
+    return void 0;
+  const lowered = cleaned.toLowerCase();
+  if (lowered === "unknown" || lowered === "user" || lowered === "null" || lowered === "none")
+    return void 0;
+  if (cleaned.includes("@"))
+    return void 0;
+  return cleaned;
+}
 function normalizeToolEnvName(tool) {
   const normalized = tool?.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return normalized || void 0;
 }
-function toolEnvValue(suffix) {
-  const tool = normalizeToolEnvName(process.env.TINYAI_OBS_TOOL);
+function toolEnvValueForTool(toolName, suffix) {
+  const tool = normalizeToolEnvName(toolName);
   if (tool) {
     const value = clean(process.env[`TINYAI_OBS_${tool}_${suffix}`]);
     if (value)
@@ -181,15 +201,17 @@ function toolEnvValue(suffix) {
   return clean(process.env[`TINYAI_OBS_${suffix}`]);
 }
 function resolveUserIdentity(overrides = {}) {
-  const userEmail = clean(overrides.user_email) || toolEnvValue("USER_EMAIL");
-  const userDisplayName = clean(overrides.user_display_name) || toolEnvValue("USER_DISPLAY_NAME") || toolEnvValue("USER_NAME");
-  const username = clean(overrides.username) || toolEnvValue("USERNAME") || userDisplayName || resolveUsername();
-  const userId = clean(overrides.user_id) || toolEnvValue("USER_ID") || userEmail || userDisplayName || username;
+  return resolveUserIdentityForTool(process.env.TINYAI_OBS_TOOL, overrides);
+}
+function resolveUserIdentityForTool(toolName, overrides = {}) {
+  const userDisplayName = clean(overrides.user_display_name) || toolEnvValueForTool(toolName, "USER_DISPLAY_NAME") || toolEnvValueForTool(toolName, "USER_NAME");
+  const username = clean(overrides.username) || toolEnvValueForTool(toolName, "USERNAME") || userDisplayName || resolveUsername();
+  const explicitUserId = clean(overrides.user_id) || toolEnvValueForTool(toolName, "USER_ID");
+  const userId = usableUserId(explicitUserId) || usableUserId(username) || usableUserId(userDisplayName) || username;
   const hostname2 = clean(process.env.HOSTNAME) || "local";
   return {
     username,
     user_id: userId,
-    user_email: userEmail,
     user_display_name: userDisplayName,
     team: clean(overrides.team) || clean(process.env.TINYAI_OBS_TEAM),
     machine_id: clean(overrides.machine_id) || clean(process.env.TINYAI_OBS_MACHINE_ID),
@@ -214,6 +236,44 @@ function makeEvent(input) {
     ...identity,
     model: input.model ?? resolveModel()
   };
+}
+
+// ../../plugin-runtime/dist/plugin-version.js
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import { dirname, join as join2 } from "node:path";
+import { fileURLToPath } from "node:url";
+function readVersion(path) {
+  if (!existsSync2(path))
+    return void 0;
+  try {
+    const parsed = JSON.parse(readFileSync2(path, "utf8"));
+    const version = typeof parsed?.version === "string" ? parsed.version.trim() : "";
+    return version || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function discoverPluginVersion(startUrl = import.meta.url) {
+  let dir = dirname(fileURLToPath(startUrl));
+  for (let depth = 0; depth < 8; depth += 1) {
+    const claudeVersion = readVersion(join2(dir, ".claude-plugin", "plugin.json"));
+    if (claudeVersion)
+      return claudeVersion;
+    const codexVersion = readVersion(join2(dir, ".codex-plugin", "plugin.json"));
+    if (codexVersion)
+      return codexVersion;
+    const parent = dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return void 0;
+}
+function resolvePluginVersion(explicit) {
+  const explicitVersion = explicit?.trim();
+  if (explicitVersion)
+    return explicitVersion;
+  return discoverPluginVersion() || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0";
 }
 
 // ../../plugin-runtime/dist/redactor.js
@@ -254,7 +314,7 @@ function redact(value, options = {}) {
 
 // ../../plugin-runtime/dist/queue.js
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname as dirname2, extname } from "node:path";
 var MAX_QUEUE_BYTES = Number(process.env.TINYAI_OBS_QUEUE_MAX_BYTES || 1024 * 1024 * 1024);
 var MAX_QUEUE_BATCHES = Number(process.env.TINYAI_OBS_QUEUE_MAX_BATCHES || 2e3);
 function toolFromBatch(batch) {
@@ -273,9 +333,9 @@ function queueEntryFromBatch(batch, options = {}) {
     schema_version: "tinyai.queue.v2",
     queue_id: queueIdFor(batch),
     tool: toolFromBatch(batch),
-    status: "queued",
+    status: options.status || "queued",
     retry_count: options.retryCount || 0,
-    first_seen_at: now,
+    first_seen_at: options.firstSeenAt || now,
     last_attempt_at: now,
     next_retry_at: options.nextRetryAt,
     last_error: options.lastError,
@@ -283,18 +343,35 @@ function queueEntryFromBatch(batch, options = {}) {
     batch
   };
 }
-function batchFromQueueLine(value) {
+function entryFromQueueLine(value) {
   if (!value || typeof value !== "object")
     return void 0;
   const record4 = value;
   if (record4.schema_version === "tinyai.queue.v2") {
     const batch = record4.batch;
-    return batch && typeof batch === "object" ? batch : void 0;
+    if (!batch || typeof batch !== "object")
+      return void 0;
+    return {
+      schema_version: "tinyai.queue.v2",
+      queue_id: typeof record4.queue_id === "string" ? record4.queue_id : queueIdFor(batch),
+      tool: typeof record4.tool === "string" ? record4.tool : toolFromBatch(batch),
+      status: record4.status === "dead_letter" ? "dead_letter" : "queued",
+      retry_count: typeof record4.retry_count === "number" ? record4.retry_count : 0,
+      first_seen_at: typeof record4.first_seen_at === "string" ? record4.first_seen_at : (/* @__PURE__ */ new Date()).toISOString(),
+      last_attempt_at: typeof record4.last_attempt_at === "string" ? record4.last_attempt_at : (/* @__PURE__ */ new Date()).toISOString(),
+      next_retry_at: typeof record4.next_retry_at === "string" ? record4.next_retry_at : void 0,
+      last_error: typeof record4.last_error === "string" ? record4.last_error : void 0,
+      error_category: typeof record4.error_category === "string" ? record4.error_category : "retryable",
+      batch
+    };
   }
-  return record4.events && Array.isArray(record4.events) ? record4 : void 0;
+  if (record4.events && Array.isArray(record4.events)) {
+    return queueEntryFromBatch(record4);
+  }
+  return void 0;
 }
 async function enqueueBatch(batch, queuePath = defaultQueuePath(toolFromBatch(batch)), options = {}) {
-  await mkdir(dirname(queuePath), { recursive: true });
+  await mkdir(dirname2(queuePath), { recursive: true });
   await writeFile(queuePath, `${JSON.stringify(queueEntryFromBatch(batch, options))}
 `, { flag: "a" });
   const info = await stat(queuePath).catch(() => void 0);
@@ -303,16 +380,25 @@ async function enqueueBatch(batch, queuePath = defaultQueuePath(toolFromBatch(ba
     await replaceQueue(batches.slice(-Math.max(1, Math.floor(MAX_QUEUE_BATCHES / 2))), queuePath);
   }
 }
-async function readQueuedBatches(queuePath = defaultQueuePath()) {
+function deadLetterQueuePath(queuePath = defaultQueuePath()) {
+  const ext = extname(queuePath);
+  return ext ? `${queuePath.slice(0, -ext.length)}.dead-letter${ext}` : `${queuePath}.dead-letter`;
+}
+async function deadLetterBatch(batch, queuePath = defaultQueuePath(toolFromBatch(batch)), options = {}) {
+  await mkdir(dirname2(queuePath), { recursive: true });
+  await writeFile(deadLetterQueuePath(queuePath), `${JSON.stringify(queueEntryFromBatch(batch, { ...options, status: "dead_letter" }))}
+`, { flag: "a" });
+}
+async function readQueuedEntries(queuePath = defaultQueuePath()) {
   try {
     const raw = await readFile(queuePath, "utf8");
-    const batches = [];
+    const entries = [];
     const corrupt = [];
     for (const line of raw.split("\n").filter(Boolean)) {
       try {
-        const batch = batchFromQueueLine(JSON.parse(line));
-        if (batch)
-          batches.push(batch);
+        const entry = entryFromQueueLine(JSON.parse(line));
+        if (entry)
+          entries.push(entry);
       } catch {
         corrupt.push(line);
       }
@@ -321,22 +407,28 @@ async function readQueuedBatches(queuePath = defaultQueuePath()) {
       await writeFile(`${queuePath}.corrupt`, `${corrupt.join("\n")}
 `, { flag: "a" });
     }
-    return batches.slice(-MAX_QUEUE_BATCHES);
+    return entries.slice(-MAX_QUEUE_BATCHES);
   } catch (error) {
     if (error?.code === "ENOENT")
       return [];
     throw error;
   }
 }
-async function replaceQueue(batches, queuePath = defaultQueuePath()) {
-  await mkdir(dirname(queuePath), { recursive: true });
-  if (!batches.length) {
+async function readQueuedBatches(queuePath = defaultQueuePath()) {
+  return (await readQueuedEntries(queuePath)).map((entry) => entry.batch);
+}
+async function replaceQueueEntries(entries, queuePath = defaultQueuePath()) {
+  await mkdir(dirname2(queuePath), { recursive: true });
+  if (!entries.length) {
     await rm(queuePath, { force: true });
     return;
   }
   const temp = `${queuePath}.tmp`;
-  await writeFile(temp, batches.map((batch) => JSON.stringify(queueEntryFromBatch(batch))).join("\n") + "\n");
+  await writeFile(temp, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   await rename(temp, queuePath);
+}
+async function replaceQueue(batches, queuePath = defaultQueuePath()) {
+  await replaceQueueEntries(batches.map((batch) => queueEntryFromBatch(batch)), queuePath);
 }
 
 // ../../plugin-runtime/dist/client.js
@@ -344,6 +436,8 @@ loadTinyAiEnvFile();
 var TURN_BLOB_INLINE_LIMIT = Number(process.env.TINYAI_OBS_TURN_BLOB_INLINE_LIMIT || 64 * 1024);
 var TURN_BLOB_CHUNK_BYTES = Number(process.env.TINYAI_OBS_TURN_BLOB_CHUNK_BYTES || 256 * 1024);
 var TURN_TEXT_PREVIEW_CHARS = Number(process.env.TINYAI_OBS_TURN_TEXT_PREVIEW_CHARS || 2e3);
+var QUEUE_FLUSH_MAX_BATCHES = Math.max(1, Number(process.env.TINYAI_OBS_QUEUE_FLUSH_MAX_BATCHES || 100) || 100);
+var queueFlushes = /* @__PURE__ */ new Map();
 var RAW_BLOB_KEYS = /* @__PURE__ */ new Set([
   "arguments_raw",
   "result_raw",
@@ -366,6 +460,8 @@ function defaultPluginNameForTool(tool) {
     return "tinyai-observability-codex";
   if (tool === "copilot")
     return "tinyai-observability-vscode";
+  if (tool === "git")
+    return "tinyai-observability-git-hook";
   return "tinyai-observability";
 }
 function isLocalCollectorUrl(value) {
@@ -509,7 +605,7 @@ function classifyUploadError(error) {
     return "payload_too_large";
   if (/\b401\b|\b403\b|invalid collector token|requires a bearer token|upload blocked/.test(message))
     return "config_error";
-  if (/\b400\b|schema|validation/.test(message))
+  if (/\b400\b|\b422\b|unprocessable entity|schema|validation/.test(message))
     return "schema_error";
   if (/\b429\b|rate limit|too many requests/.test(message))
     return "rate_limited";
@@ -517,9 +613,22 @@ function classifyUploadError(error) {
     return "retryable";
   return "unknown";
 }
+function isPermanentQueueError(category) {
+  return category === "config_error" || category === "schema_error" || category === "payload_too_large";
+}
 function safeErrorMessage(error) {
   const message = error instanceof Error ? error.message : String(error || "collector upload failed");
   return message.slice(0, 500);
+}
+function retryEntry(entry, error, errorCategory) {
+  return {
+    ...entry,
+    retry_count: (entry.retry_count || 0) + 1,
+    last_attempt_at: (/* @__PURE__ */ new Date()).toISOString(),
+    last_error: safeErrorMessage(error),
+    error_category: errorCategory,
+    status: "queued"
+  };
 }
 var CollectorClient = class {
   baseUrl;
@@ -540,7 +649,7 @@ var CollectorClient = class {
     ]);
     this.token = options.token || process.env.TINYAI_OBS_TOKEN || "";
     this.pluginName = options.pluginName || defaultPluginNameForTool(options.tool);
-    this.pluginVersion = options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0";
+    this.pluginVersion = resolvePluginVersion(options.pluginVersion);
     this.queuePath = options.queuePath;
   }
   makeBatch(tool, events) {
@@ -553,7 +662,7 @@ var CollectorClient = class {
       model: resolveModel(),
       events: events.map((event2) => ({
         ...event2,
-        payload: event2.event_type === "turn_snapshot" || event2.event_type === "code_change" || event2.event_type === "commit_snapshot" || event2.event_type === "push_snapshot" ? blobifyTurnPayload(event2.payload) : redact(event2.payload, {
+        payload: event2.event_type === "turn_snapshot" || event2.event_type === "code_change" || event2.event_type === "commit_snapshot" ? blobifyTurnPayload(event2.payload) : redact(event2.payload, {
           allowFullConversationText: (event2.event_type === "conversation_snapshot" || event2.event_type === "agent_process_snapshot") && event2.payload?.include_text === true
         })
       }))
@@ -568,13 +677,17 @@ var CollectorClient = class {
       return result;
     } catch (error) {
       const errorCategory = classifyUploadError(error);
-      await enqueueBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
+      if (isPermanentQueueError(errorCategory)) {
+        await deadLetterBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
+      } else {
+        await enqueueBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
+      }
       return {
         accepted: 0,
         duplicates: 0,
-        failed: 0,
+        failed: isPermanentQueueError(errorCategory) ? events.length : 0,
         task_count: new Set(events.map((event2) => event2.task_id)).size,
-        queued: true,
+        queued: !isPermanentQueueError(errorCategory),
         events: events.map((event2) => ({
           event_id: event2.event_id,
           event_type: event2.event_type,
@@ -586,19 +699,54 @@ var CollectorClient = class {
   }
   async flushQueue(tool = this.tool) {
     const queuePath = this.queuePathFor(tool);
-    const queued = await readQueuedBatches(queuePath);
-    const remaining = [];
-    let sent = 0;
-    for (const batch of queued) {
-      try {
-        const result = await this.postBatch(batch);
-        sent += result.accepted + result.duplicates;
-      } catch {
-        remaining.push(batch);
+    const existing = queueFlushes.get(queuePath);
+    if (existing)
+      return existing;
+    const running = this.flushQueueOnce(queuePath);
+    queueFlushes.set(queuePath, running);
+    try {
+      return await running;
+    } finally {
+      if (queueFlushes.get(queuePath) === running) {
+        queueFlushes.delete(queuePath);
       }
     }
-    await replaceQueue(remaining, queuePath);
-    return { sent, remaining: remaining.length };
+  }
+  async flushQueueOnce(queuePath) {
+    const queued = await readQueuedEntries(queuePath);
+    const retryableRemaining = [];
+    let sent = 0;
+    const toFlush = queued.slice(0, QUEUE_FLUSH_MAX_BATCHES);
+    const deferred = queued.slice(QUEUE_FLUSH_MAX_BATCHES);
+    for (const entry of toFlush) {
+      if (isPermanentQueueError(entry.error_category)) {
+        await deadLetterBatch(entry.batch, queuePath, {
+          errorCategory: entry.error_category,
+          lastError: entry.last_error,
+          retryCount: entry.retry_count,
+          firstSeenAt: entry.first_seen_at
+        });
+        continue;
+      }
+      try {
+        const result = await this.postBatch(entry.batch);
+        sent += result.accepted + result.duplicates;
+      } catch (error) {
+        const errorCategory = classifyUploadError(error);
+        if (isPermanentQueueError(errorCategory)) {
+          await deadLetterBatch(entry.batch, queuePath, {
+            errorCategory,
+            lastError: safeErrorMessage(error),
+            retryCount: (entry.retry_count || 0) + 1,
+            firstSeenAt: entry.first_seen_at
+          });
+        } else {
+          retryableRemaining.push(retryEntry(entry, error, errorCategory));
+        }
+      }
+    }
+    await replaceQueueEntries([...retryableRemaining, ...deferred], queuePath);
+    return { sent, remaining: retryableRemaining.length + deferred.length };
   }
   queuePathFor(tool) {
     return this.queuePath || tinyAiQueuePathForTool(tool || this.tool);
@@ -652,12 +800,125 @@ function uniqueCollectorUrls(urls) {
 // ../../plugin-runtime/dist/claude-bash-delta.js
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+// ../../plugin-runtime/dist/claude-workspace-fallback.js
+function textFromUnknown(value) {
+  if (typeof value === "string")
+    return value;
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
+  if (Array.isArray(value))
+    return value.map(textFromUnknown).filter(Boolean).join("\n");
+  if (value && typeof value === "object") {
+    return Object.values(value).map(textFromUnknown).filter(Boolean).join("\n");
+  }
+  return "";
+}
+function cleanPathCandidate(candidate) {
+  const trimmed = candidate.trim();
+  if (!trimmed)
+    return void 0;
+  if (trimmed.length > 500)
+    return void 0;
+  if (/^(https?:|mailto:|data:)/i.test(trimmed))
+    return void 0;
+  if (trimmed.includes("node_modules/") || trimmed.includes(".git/"))
+    return void 0;
+  return trimmed.replace(/^file:\/\//, "");
+}
+function collectClaudePotentialFilePaths(value) {
+  const text = textFromUnknown(value);
+  const output = /* @__PURE__ */ new Set();
+  const patterns = [
+    /(?:^|[\s"'`=:(])((?:\.{1,2}\/|\/|~\/)?[\w.@%+=:,~/-]+\.[A-Za-z0-9_+-]{1,16})(?=$|[\s"'`),;])/g,
+    /(?:^|[\s"'`=:(])((?:\.{1,2}\/|\/|~\/)?[\w.@%+=:,~/-]+\/[\w.@%+=:,~/-]+)(?=$|[\s"'`),;])/g
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const cleaned = cleanPathCandidate(match[1] || "");
+      if (cleaned)
+        output.add(cleaned);
+    }
+  }
+  return [...output].slice(0, 50);
+}
+function terminalWriteSignal(text) {
+  return /(write_text|writefilesync|writefile|appendfile|open\s*\([^)]*['"]w|(?<![0-9])>>|(?<![0-9])>\s*[^&]|\btee\s+|\bsed\s+-i\b|\bperl\s+-pi\b|\btouch\s+|\bcp\s+|\bmv\s+|\brm\s+)/.test(text);
+}
+function isTerminalTool(toolName) {
+  return /(bash|shell|terminal|run_command|run_in_terminal)/.test(toolName);
+}
+function isDirectEditTool(toolName) {
+  return /(replace_string_in_file|create_file|edit_file|write_file|insert_edit)/.test(toolName);
+}
+function collectClaudeToolPathArguments(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return [];
+  const record4 = value;
+  const output = /* @__PURE__ */ new Set();
+  for (const key of ["file_path", "filePath", "path", "relative_path", "absolute_path", "target_path"]) {
+    const candidate = record4[key];
+    if (typeof candidate !== "string")
+      continue;
+    const cleaned = cleanPathCandidate(candidate);
+    if (cleaned)
+      output.add(cleaned);
+  }
+  return [...output].slice(0, 20);
+}
+function hasClaudeToolPatchPath(snapshot) {
+  return (snapshot.code_changes || []).some((change) => {
+    const filePath = typeof change.file_path === "string" ? cleanPathCandidate(change.file_path) : void 0;
+    return Boolean(filePath);
+  });
+}
+function hasClaudeExternalWriteSignal(snapshot) {
+  if (hasClaudeToolPatchPath(snapshot))
+    return true;
+  for (const toolCall of snapshot.tool_calls || []) {
+    const name = String(toolCall.tool_name || toolCall.name || "").toLowerCase();
+    if (isDirectEditTool(name))
+      return true;
+    if (!isTerminalTool(name))
+      continue;
+    const command = textFromUnknown(toolCall.arguments_raw).toLowerCase();
+    if (terminalWriteSignal(command))
+      return true;
+  }
+  return false;
+}
+function claudeWorkspaceDiffPathCandidates(snapshot) {
+  const paths = /* @__PURE__ */ new Set();
+  for (const change of snapshot.code_changes || []) {
+    const filePath = typeof change.file_path === "string" ? cleanPathCandidate(change.file_path) : void 0;
+    if (filePath)
+      paths.add(filePath);
+  }
+  for (const toolCall of snapshot.tool_calls || []) {
+    const name = String(toolCall.tool_name || toolCall.name || "").toLowerCase();
+    if (isDirectEditTool(name)) {
+      for (const path of collectClaudeToolPathArguments(toolCall.arguments_raw))
+        paths.add(path);
+      continue;
+    }
+    if (!isTerminalTool(name))
+      continue;
+    const command = textFromUnknown(toolCall.arguments_raw).toLowerCase();
+    if (!terminalWriteSignal(command))
+      continue;
+    for (const path of collectClaudePotentialFilePaths(toolCall.arguments_raw))
+      paths.add(path);
+  }
+  return [...paths].slice(0, 50);
+}
+
+// ../../plugin-runtime/dist/claude-bash-delta.js
 var execFileAsync = promisify(execFile);
 
 // ../../plugin-runtime/dist/claude-turn.js
 import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir2 } from "node:os";
-import { basename, join as join2 } from "node:path";
+import { basename, isAbsolute, join as join3, resolve as resolve2 } from "node:path";
 import { open, readdir, readFile as readFile2, stat as stat2 } from "node:fs/promises";
 var CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.3";
 var JSONL_READ_CHUNK_BYTES = 1024 * 1024;
@@ -779,6 +1040,19 @@ function isRealUserPrompt(entry) {
     return false;
   return true;
 }
+function isClaudeUserInterruptMarker(entry) {
+  if (entry.type !== "user")
+    return false;
+  const message = record(entry.message);
+  if (message?.role !== "user")
+    return false;
+  const text = textFromClaudeContent(message.content, {
+    excludeToolBlocks: true,
+    excludeSystemReminder: true,
+    excludeContext: true
+  }).trim();
+  return /^\[Request interrupted by user/i.test(text);
+}
 async function countPriorClaudeUserTurns(filePath, startOffset, requestedSessionId) {
   if (startOffset <= 0)
     return 0;
@@ -891,7 +1165,52 @@ function toolSummary(toolName, args) {
 function lineHash(filePath, text) {
   return hashText(`${filePath}\0${text}`);
 }
-function diffFromReplacement(args, toolName, toolCallId, requestId2, responseId, turnIndex) {
+function splitReplacementLines(value) {
+  const lines = value.split(/\r?\n/);
+  if (lines.length && lines[lines.length - 1] === "")
+    lines.pop();
+  return lines;
+}
+function countLinesBefore(value, index) {
+  if (index <= 0)
+    return 0;
+  let count = 0;
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    if (value.charCodeAt(cursor) === 10)
+      count += 1;
+  }
+  return count;
+}
+function uniqueIndexOf(haystack, needle) {
+  if (!needle)
+    return void 0;
+  const first = haystack.indexOf(needle);
+  if (first < 0)
+    return void 0;
+  return haystack.indexOf(needle, first + needle.length) < 0 ? first : void 0;
+}
+function resolvedToolFilePath(filePath, workspacePath2, cwd3) {
+  if (isAbsolute(filePath))
+    return filePath;
+  const root = cwd3 || workspacePath2;
+  return root ? resolve2(root, filePath) : void 0;
+}
+async function absoluteReplacementStartLine(filePath, newText, workspacePath2, cwd3) {
+  const absolutePath = resolvedToolFilePath(filePath, workspacePath2, cwd3);
+  if (!absolutePath)
+    return void 0;
+  let content;
+  try {
+    content = await readFile2(absolutePath, "utf8");
+  } catch {
+    return void 0;
+  }
+  const matchIndex = uniqueIndexOf(content, newText);
+  if (matchIndex === void 0)
+    return void 0;
+  return countLinesBefore(content, matchIndex) + 1;
+}
+async function diffFromReplacement(args, toolName, toolCallId, requestId2, responseId, turnIndex, workspacePath2, cwd3) {
   const filePath = filePathFromArgs(args);
   if (!filePath)
     return void 0;
@@ -899,13 +1218,16 @@ function diffFromReplacement(args, toolName, toolCallId, requestId2, responseId,
   const newText = cleanString(args.new_string) ?? cleanString(args.newString) ?? cleanString(args.replacement) ?? cleanString(args.content) ?? "";
   if (!oldText && !newText)
     return void 0;
-  const oldLines = oldText.split(/\r?\n/).filter((line) => line.length > 0);
-  const newLines = newText.split(/\r?\n/).filter((line) => line.length > 0);
+  const oldLines = splitReplacementLines(oldText);
+  const newLines = splitReplacementLines(newText);
+  const absoluteStartLine = await absoluteReplacementStartLine(filePath, newText, workspacePath2, cwd3);
+  const lineOffset = absoluteStartLine !== void 0 ? absoluteStartLine - 1 : 0;
+  const lineNumberBasis = absoluteStartLine !== void 0 ? "absolute" : "relative";
   const lines = [];
   oldLines.forEach((line, index) => {
     lines.push({
       line_type: "removed",
-      old_line: index + 1,
+      old_line: lineOffset + index + 1,
       text: line,
       text_hash: lineHash(filePath, line)
     });
@@ -913,7 +1235,7 @@ function diffFromReplacement(args, toolName, toolCallId, requestId2, responseId,
   newLines.forEach((line, index) => {
     lines.push({
       line_type: "added",
-      new_line: index + 1,
+      new_line: lineOffset + index + 1,
       text: line,
       text_hash: lineHash(filePath, line)
     });
@@ -923,11 +1245,13 @@ function diffFromReplacement(args, toolName, toolCallId, requestId2, responseId,
     file_path: filePath,
     lines_added: newLines.length,
     lines_deleted: oldLines.length,
+    line_number_basis: lineNumberBasis,
+    line_numbers_are_absolute: lineNumberBasis === "absolute",
     hunks: [
       {
-        old_start: 1,
+        old_start: lineOffset + 1,
         old_lines: oldLines.length,
-        new_start: 1,
+        new_start: lineOffset + 1,
         new_lines: newLines.length,
         lines
       }
@@ -950,7 +1274,7 @@ async function latestClaudeProjectFile(options = {}) {
     } catch {
     }
   }
-  const roots = [join2(homedir2(), ".claude", "projects"), join2(homedir2(), ".claude", "transcripts")];
+  const roots = [join3(homedir2(), ".claude", "projects"), join3(homedir2(), ".claude", "transcripts")];
   const candidates = [];
   async function walk2(dir, depth = 0) {
     if (depth > 3)
@@ -962,7 +1286,7 @@ async function latestClaudeProjectFile(options = {}) {
       return;
     }
     for (const entry of entries) {
-      const full = join2(dir, entry.name);
+      const full = join3(dir, entry.name);
       if (entry.isDirectory()) {
         await walk2(full, depth + 1);
       } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
@@ -1007,10 +1331,14 @@ function attachToolResult(turn, entry) {
     const toolCallId = cleanString(rec.tool_use_id) || cleanString(entry.sourceToolAssistantUUID) || `tool_result_${hashJson(rec).slice(0, 16)}`;
     const content = textFromClaudeContent([rec]);
     const existing = turn.tools.get(toolCallId);
+    const failed = isFailedToolResult(rec, entry);
     if (existing) {
-      existing.status = rec.is_error ? "failed" : "complete";
+      existing.status = failed ? "failed" : "complete";
       existing.result_raw = entry.toolUseResult || rec.content;
       existing.completed_at = at;
+    }
+    if (failed) {
+      turn.codeChanges = turn.codeChanges.filter((change) => change.tool_call_id !== toolCallId);
     }
     turn.steps.push({
       step_id: hashText(`${turn.requestId}:tool_result:${toolCallId}:${content}`).slice(0, 32),
@@ -1021,14 +1349,29 @@ function attachToolResult(turn, entry) {
       source_event_type: "tool_result",
       tool_call_id: toolCallId,
       tool_name: existing?.tool_name,
-      status: rec.is_error ? "failed" : "complete",
+      status: failed ? "failed" : "complete",
       occurred_at: at,
       actor_path: "top",
       actor_type: "assistant"
     });
   }
 }
-function attachAssistantBlocks(turn, entry) {
+function isFailedToolResult(rec, entry) {
+  if (rec.is_error === true || rec.isError === true)
+    return true;
+  const result = entry.toolUseResult ?? rec.content;
+  if (typeof result === "string") {
+    return /user rejected tool use|tool use was rejected|tool interrupted|request interrupted|cancelled|canceled|denied/i.test(result);
+  }
+  const resultRecord = record(result);
+  if (resultRecord) {
+    const status = cleanString(resultRecord.status) || cleanString(resultRecord.error) || "";
+    if (/failed|error|rejected|interrupted|cancelled|canceled|denied/i.test(status))
+      return true;
+  }
+  return false;
+}
+async function attachAssistantBlocks(turn, entry, workspacePath2) {
   const message = record(entry.message);
   const at = isoTimestamp(entry.timestamp);
   updateTurnContext(turn, entry);
@@ -1097,7 +1440,7 @@ function attachAssistantBlocks(turn, entry) {
         actor_type: "assistant"
       });
       if (["replace_string_in_file", "edit_file", "create_file"].includes(toolName)) {
-        const change = diffFromReplacement(args, toolName, toolCallId, turn.requestId, responseId, turn.turnIndex);
+        const change = await diffFromReplacement(args, toolName, toolCallId, turn.requestId, responseId, turn.turnIndex, workspacePath2, turn.cwd);
         if (change)
           turn.codeChanges.push(change);
       }
@@ -1127,9 +1470,26 @@ function updateTurnContext(turn, entry) {
   turn.entrypoint = cleanString(entry.entrypoint) || turn.entrypoint;
   turn.version = cleanString(entry.version) || turn.version;
 }
+function markTurnInterrupted(turn, occurredAt) {
+  turn.status = "failed";
+  turn.interrupted = true;
+  turn.interruptReason = "request_interrupted_by_user";
+  turn.finishReason = "request_interrupted_by_user";
+  turn.completedAt = occurredAt || turn.assistantAt || turn.startedAt;
+}
+function markTurnAbandoned(turn, occurredAt) {
+  turn.status = "failed";
+  turn.abandoned = true;
+  turn.finishReason = "next_user_turn_started";
+  turn.completedAt = occurredAt || turn.assistantAt || turn.startedAt;
+}
 function finalizeTurn(turn, sourcePath, sourceInfo) {
   const responseId = turn.responseId || `${turn.requestId}:no_response`;
-  for (const change of turn.codeChanges) {
+  const confirmedCodeChanges = turn.codeChanges.filter((change) => {
+    const toolCall = change.tool_call_id ? turn.tools.get(change.tool_call_id) : void 0;
+    return !toolCall || toolCall.status === "complete";
+  });
+  for (const change of confirmedCodeChanges) {
     change.request_id = turn.requestId;
     change.response_id = responseId;
     change.turn_index = turn.turnIndex;
@@ -1196,7 +1556,7 @@ function finalizeTurn(turn, sourcePath, sourceInfo) {
     visible_reasoning: visibleReasoning,
     process_steps: processSteps,
     tool_calls: [...turn.tools.values()],
-    code_changes: turn.codeChanges,
+    code_changes: confirmedCodeChanges,
     request_usage: requestUsage,
     usage_totals: {
       prompt_tokens: turn.usage.prompt_tokens,
@@ -1210,6 +1570,10 @@ function finalizeTurn(turn, sourcePath, sourceInfo) {
       response_id: responseId,
       attempt: 1,
       status: turn.status,
+      interrupted: turn.interrupted || void 0,
+      interrupt_reason: turn.interruptReason,
+      abandoned: turn.abandoned || void 0,
+      finish_reason: turn.finishReason,
       started_at: turn.startedAt,
       completed_at: turn.completedAt
     },
@@ -1269,7 +1633,18 @@ async function captureLatestClaudeTurnSnapshots(options = {}) {
     const sessionId = cleanString(entry.sessionId) || cleanString(entry.session_id) || requestedSessionId || basename(filePath, ".jsonl");
     if (requestedSessionId && sessionId !== requestedSessionId)
       continue;
+    if (isClaudeUserInterruptMarker(entry)) {
+      if (current) {
+        markTurnInterrupted(current, isoTimestamp(entry.timestamp));
+        current.endOffset = lineEndOffset;
+        finishCurrent();
+      }
+      continue;
+    }
     if (isRealUserPrompt(entry)) {
+      if (current && current.status === "incomplete") {
+        markTurnAbandoned(current, isoTimestamp(entry.timestamp));
+      }
       finishCurrent();
       turnIndex += 1;
       const text = textFromEntry(entry);
@@ -1320,7 +1695,7 @@ async function captureLatestClaudeTurnSnapshots(options = {}) {
     }
     if (entry.type === "assistant") {
       const message = record(entry.message);
-      attachAssistantBlocks(current, entry);
+      await attachAssistantBlocks(current, entry, options.workspacePath);
       current.endOffset = lineEndOffset;
       const text = assistantTextFromEntry(entry);
       const at = isoTimestamp(entry.timestamp);
@@ -1618,11 +1993,11 @@ function hashJson2(value) {
 function stepId(seed) {
   return hashText2(seed).slice(0, 32);
 }
-function textFromUnknown(value) {
+function textFromUnknown2(value) {
   if (typeof value === "string")
     return value;
   if (Array.isArray(value))
-    return value.map(textFromUnknown).filter(Boolean).join("\n");
+    return value.map(textFromUnknown2).filter(Boolean).join("\n");
   const rec = record3(value);
   if (!rec)
     return "";
@@ -1632,18 +2007,18 @@ function textFromUnknown(value) {
       return candidate;
   }
   if (Array.isArray(rec.parts))
-    return rec.parts.map(textFromUnknown).filter(Boolean).join("\n");
+    return rec.parts.map(textFromUnknown2).filter(Boolean).join("\n");
   return "";
 }
 function userTextFromRendered(value) {
-  const rendered = textFromUnknown(value);
+  const rendered = textFromUnknown2(value);
   if (!rendered)
     return "";
   const match = /<userRequest>\s*([\s\S]*?)\s*<\/userRequest>/i.exec(rendered);
   return (match?.[1] || "").trim();
 }
 function userTextFromRequest(request) {
-  const messageText = textFromUnknown(request.message);
+  const messageText = textFromUnknown2(request.message);
   if (messageText.trim())
     return messageText.trim();
   const metadata = record3(request.metadata) || {};
@@ -1657,7 +2032,7 @@ function assistantTextFromResponseParts(value) {
     const kind = String(rec.kind || "");
     if (kind === "thinking" || kind === "mcpServersStarting" || kind === "toolInvocationSerialized")
       return "";
-    return textFromUnknown(rec.value || rec);
+    return textFromUnknown2(rec.value || rec);
   }).filter(Boolean).join("\n").trim();
 }
 function finalAnswerFromRequest(request) {
@@ -1666,7 +2041,7 @@ function finalAnswerFromRequest(request) {
   const result = record3(request.result);
   if (result && Array.isArray(result.response))
     return assistantTextFromResponseParts(result.response);
-  return textFromUnknown(request.responseText || result?.text || result?.content).trim();
+  return textFromUnknown2(request.responseText || result?.text || result?.content).trim();
 }
 function completedAtFromRequest(request) {
   const modelState = record3(request.modelState);
@@ -1833,13 +2208,13 @@ function parseCopilotTranscriptEvents(entries) {
       subAgents.push({ source_event_type: type, occurred_at: occurredAt, ...actor, data });
     }
     if (type === "assistant.message") {
-      const content = textFromUnknown(data.content);
+      const content = textFromUnknown2(data.content);
       const progress = textStep("assistant_progress", content, "transcript", type, occurredAt, actor);
       if (progress) {
         assistantProgress.push(progress);
         processSteps.push(progress);
       }
-      const reasoning = textFromUnknown(data.reasoningText || data.thinking);
+      const reasoning = textFromUnknown2(data.reasoningText || data.thinking);
       const reasoningStep = textStep("visible_reasoning", reasoning, "transcript", type, occurredAt, {
         ...actor,
         status: "complete"
@@ -2046,8 +2421,8 @@ var JSONL_READ_CHUNK_BYTES2 = 1024 * 1024;
 import { execFile as execFile2 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
 import { chmod, mkdir as mkdir2, readFile as readFile3, unlink, writeFile as writeFile2 } from "node:fs/promises";
-import { dirname as dirname2, join as join3 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname as dirname3, join as join4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { promisify as promisify2 } from "node:util";
 var execFileAsync2 = promisify2(execFile2);
 async function git(workspacePath2, args, timeout = 1e4) {
@@ -2056,13 +2431,13 @@ async function git(workspacePath2, args, timeout = 1e4) {
 }
 async function resolvedGitDir(workspacePath2) {
   const gitDir = await git(workspacePath2, ["rev-parse", "--git-dir"]);
-  return gitDir.startsWith("/") ? gitDir : join3(workspacePath2, gitDir);
+  return gitDir.startsWith("/") ? gitDir : join4(workspacePath2, gitDir);
 }
 async function aiActivityMarkerPath(workspacePath2) {
-  return join3(await resolvedGitDir(workspacePath2), "tinyai-observability", "ai-activity.json");
+  return join4(await resolvedGitDir(workspacePath2), "tinyai-observability", "ai-activity.json");
 }
 async function aiLineEvidencePath(workspacePath2) {
-  return join3(await resolvedGitDir(workspacePath2), "tinyai-observability", "ai-line-spans.jsonl");
+  return join4(await resolvedGitDir(workspacePath2), "tinyai-observability", "ai-line-spans.jsonl");
 }
 function markerTtlMs() {
   const seconds = Number.parseInt(process.env.TINYAI_OBS_AI_MARKER_TTL_SECONDS || "21600", 10);
@@ -2211,6 +2586,7 @@ function parseUnifiedDiffDetails(diff, options = {}) {
         file_path: filePath,
         old_path: pendingOldPath,
         sensitive: isSensitiveDiffPath(filePath),
+        line_number_basis: "absolute",
         lines_added: 0,
         lines_deleted: 0,
         hunks: []
@@ -2245,6 +2621,7 @@ function parseUnifiedDiffDetails(diff, options = {}) {
   const filePaths = files.map((file) => file.file_path).filter(Boolean);
   return {
     snapshot_kind: "workspace_diff",
+    line_number_basis: "absolute",
     diff_hash: createHash5("sha256").update(diff).digest("hex").slice(0, 32),
     include_text: includeText,
     truncated,
@@ -2315,7 +2692,7 @@ async function markAiActivity(workspacePath2, options) {
       marked_at: now.toISOString(),
       expires_at: new Date(now.getTime() + ttlMs).toISOString()
     };
-    await mkdir2(dirname2(path), { recursive: true });
+    await mkdir2(dirname3(path), { recursive: true });
     await writeFile2(path, JSON.stringify(marker, null, 2));
     return marker;
   } catch {
@@ -2348,7 +2725,7 @@ async function recordAiLineSnapshot(workspacePath2, options) {
     expires_at: expiresAt
   }));
   const path = await aiLineEvidencePath(workspacePath2);
-  await mkdir2(dirname2(path), { recursive: true });
+  await mkdir2(dirname3(path), { recursive: true });
   await writeFile2(path, evidence.map((item) => JSON.stringify(item)).join("\n") + "\n", { flag: "a" });
   return {
     recorded_lines: evidence.length,
@@ -2424,6 +2801,7 @@ async function currentDiffDetails(workspacePath2, options = {}) {
   } catch {
     return {
       snapshot_kind: "workspace_diff",
+      line_number_basis: "absolute",
       diff_hash: "",
       diff_raw: void 0,
       include_text: options.includeText ?? true,
@@ -2464,7 +2842,7 @@ async function untrackedFilesDiff(workspacePath2, pathspecs, includeText) {
     if (isSensitiveDiffPath(filePath))
       continue;
     try {
-      const content = await readFile3(join3(workspacePath2, filePath), "utf8");
+      const content = await readFile3(join4(workspacePath2, filePath), "utf8");
       const lines = content.split(/\r?\n/);
       if (lines.length > 0 && lines[lines.length - 1] === "")
         lines.pop();
@@ -2488,11 +2866,18 @@ async function currentBranch(workspacePath2) {
     return void 0;
   }
 }
-async function currentHead(workspacePath2) {
+async function commitIdentity(workspacePath2, ref = "HEAD") {
   try {
-    return await git(workspacePath2, ["rev-parse", "HEAD"]);
+    const raw = await git(workspacePath2, ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", ref]);
+    const [authorName, authorEmail, committerName, committerEmail] = raw.split("\0");
+    return {
+      git_author_name: authorName || void 0,
+      git_author_email: authorEmail || void 0,
+      git_committer_name: committerName || void 0,
+      git_committer_email: committerEmail || void 0
+    };
   } catch {
-    return void 0;
+    return {};
   }
 }
 async function commitSnapshot(workspacePath2, ref = "HEAD", options = {}) {
@@ -2501,9 +2886,11 @@ async function commitSnapshot(workspacePath2, ref = "HEAD", options = {}) {
     const attr = await attribution(workspacePath2, options);
     const diffRaw = await git(workspacePath2, ["show", "--unified=3", "--no-color", "--format=", ref, "--", "."], 3e4);
     const diffDetails = parseUnifiedDiffDetails(diffRaw, { includeText: true, maxFiles: 1e3, maxLinesPerFile: 2e4 });
+    const identity = await commitIdentity(workspacePath2, ref);
     return {
       ...summary,
       commit_sha: await git(workspacePath2, ["rev-parse", ref]),
+      ...identity,
       branch: await currentBranch(workspacePath2),
       snapshot_kind: "commit",
       diff_hash: diffDetails.diff_hash,
@@ -2549,83 +2936,12 @@ async function commitSnapshot(workspacePath2, ref = "HEAD", options = {}) {
     };
   }
 }
-async function upstreamRef(workspacePath2) {
-  try {
-    return await git(workspacePath2, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-  } catch {
-    return void 0;
-  }
-}
-async function commitCount(workspacePath2, range) {
-  try {
-    return Number.parseInt(await git(workspacePath2, ["rev-list", "--count", range]), 10) || 0;
-  } catch {
-    return 0;
-  }
-}
-async function pushSnapshot(workspacePath2, options = {}) {
-  const branch = await currentBranch(workspacePath2);
-  const headSha = await currentHead(workspacePath2);
-  const attr = await attribution(workspacePath2, options);
-  const upstream = await upstreamRef(workspacePath2);
-  if (!upstream || !headSha) {
-    return {
-      files_changed: 0,
-      lines_added: 0,
-      lines_deleted: 0,
-      file_paths: [],
-      branch,
-      head_sha: headSha,
-      commit_count: 0,
-      snapshot_kind: "push",
-      ...attr,
-      ai_lines_added: 0,
-      ai_lines_deleted: 0,
-      ai_attribution_method: "push_range_diff_attributed_to_recent_ai_task"
-    };
-  }
-  try {
-    const baseSha = await git(workspacePath2, ["merge-base", "HEAD", upstream]);
-    const range = `${baseSha}..HEAD`;
-    const summary = parseNumstat(await git(workspacePath2, ["diff", "--numstat", range, "--", "."]));
-    return {
-      ...summary,
-      branch,
-      upstream_ref: upstream,
-      base_sha: baseSha,
-      head_sha: headSha,
-      commit_count: await commitCount(workspacePath2, range),
-      snapshot_kind: "push",
-      ...attr,
-      ai_lines_added: attr.ai_assisted ? summary.lines_added : 0,
-      ai_lines_deleted: attr.ai_assisted ? summary.lines_deleted : 0,
-      ai_attribution_method: "push_range_diff_attributed_to_recent_ai_task"
-    };
-  } catch {
-    return {
-      files_changed: 0,
-      lines_added: 0,
-      lines_deleted: 0,
-      file_paths: [],
-      branch,
-      upstream_ref: upstream,
-      head_sha: headSha,
-      commit_count: 0,
-      snapshot_kind: "push",
-      ...attr,
-      ai_lines_added: 0,
-      ai_lines_deleted: 0,
-      ai_attribution_method: "push_range_diff_attributed_to_recent_ai_task"
-    };
-  }
-}
 async function installGitHooks(workspacePath2, options) {
   const gitDir = await resolvedGitDir(workspacePath2);
-  const hooksDir = join3(gitDir, "hooks");
+  const hooksDir = join4(gitDir, "hooks");
   await mkdir2(hooksDir, { recursive: true });
-  const hookScript = fileURLToPath(new URL("./hook.js", import.meta.url));
+  const hookScript = fileURLToPath2(new URL("./hook.js", import.meta.url));
   const envFile = options.envFile || process.env.TINYAI_OBS_ENV_FILE || DEFAULT_TINYAI_ENV_FILE;
-  const hookTool = process.env.TINYAI_OBS_GIT_HOOK_TOOL || "copilot";
   const fallbackUrls = (options.fallbackUrls && options.fallbackUrls.length > 0 ? options.fallbackUrls : tinyAiCollectorFallbackUrlsForTool(options.tool, workspacePath2)).filter(Boolean);
   const fallbackEnv = fallbackUrls.length > 0 ? fallbackUrls.join(",") : process.env.TINYAI_OBS_COLLECTOR_URLS;
   const setupLines = [
@@ -2636,23 +2952,21 @@ async function installGitHooks(workspacePath2, options) {
     options.token || process.env.TINYAI_OBS_TOKEN ? `if [ -z "\${TINYAI_OBS_TOKEN:-}" ]; then TINYAI_OBS_TOKEN=${shellQuote(options.token || process.env.TINYAI_OBS_TOKEN || "")}; fi` : "",
     `export TINYAI_OBS_ENV_FILE TINYAI_OBS_COLLECTOR_URL TINYAI_OBS_COLLECTOR_URLS TINYAI_OBS_TOKEN`,
     `export TINYAI_OBS_WORKSPACE=${shellQuote(workspacePath2)}`,
-    `if [ -z "\${TINYAI_OBS_GIT_HOOK_TOOL:-}" ]; then TINYAI_OBS_GIT_HOOK_TOOL=${shellQuote(hookTool)}; fi`,
+    `TINYAI_OBS_GIT_HOOK_TOOL='git'`,
     `export TINYAI_OBS_TOOL="$TINYAI_OBS_GIT_HOOK_TOOL"`,
     `export TINYAI_OBS_HOOK_INSTALLER_TOOL=${shellQuote(options.tool)}`,
-    `export TINYAI_OBS_PLUGIN_VERSION=${shellQuote(options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0")}`
+    `export TINYAI_OBS_PLUGIN_VERSION=${shellQuote(resolvePluginVersion(options.pluginVersion))}`
   ];
   const setupScript = setupLines.filter(Boolean).join("; ");
   const postCommit = managedHookBlock("record commit diff evidence for server-side AI attribution", `${setupScript}; TINYAI_OBS_EVENT_TYPE=commit_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true`);
-  const prePush = managedHookBlock("record AI-attributed branch diff before push", `${setupScript}; TINYAI_OBS_EVENT_TYPE=push_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true`);
-  const preCommitPath = join3(hooksDir, "pre-commit");
-  const postCommitPath = join3(hooksDir, "post-commit");
-  const prePushPath = join3(hooksDir, "pre-push");
+  const preCommitPath = join4(hooksDir, "pre-commit");
+  const postCommitPath = join4(hooksDir, "post-commit");
+  const prePushPath = join4(hooksDir, "pre-push");
   await removeManagedHook(preCommitPath);
   await writeManagedHook(postCommitPath, postCommit);
-  await writeManagedHook(prePushPath, prePush);
+  await removeManagedHook(prePushPath);
   await chmod(postCommitPath, 493);
-  await chmod(prePushPath, 493);
-  return { installed: [postCommitPath, prePushPath], git_dir: dirname2(hooksDir) };
+  return { installed: [postCommitPath], git_dir: dirname3(hooksDir) };
 }
 function shellQuote(value) {
   return `'${value.replace(/'/g, "'\\''")}'`;
@@ -2723,7 +3037,7 @@ function escapeRegExp(value) {
 
 // ../../plugin-runtime/dist/spec-detector.js
 import { readFile as readFile4, readdir as readdir2 } from "node:fs/promises";
-import { join as join4, relative } from "node:path";
+import { join as join5, relative } from "node:path";
 function classifySpecPath(filePath) {
   const normalized = filePath.replaceAll("\\", "/");
   const isCatalog = normalized.includes("/_meta/catalog") || normalized.endsWith("_meta/catalog.yml");
@@ -2763,7 +3077,7 @@ async function walk(root, maxFiles = 300) {
     for (const entry of entries) {
       if (results.length >= maxFiles)
         return;
-      const path = join4(dir, entry.name);
+      const path = join5(dir, entry.name);
       if (entry.isDirectory())
         await visit(path);
       else if (/\.(md|ya?ml)$/i.test(entry.name))
@@ -2796,8 +3110,8 @@ function inferContentMatchedBy(content, terms) {
 }
 async function searchSpecs(workspacePath2, query) {
   const roots = [
-    join4(workspacePath2, "openspec", "specs", "workspaces"),
-    join4(workspacePath2, "openspec", "specs", "official")
+    join5(workspacePath2, "openspec", "specs", "workspaces"),
+    join5(workspacePath2, "openspec", "specs", "official")
   ];
   const files = (await Promise.all(roots.map((root) => walk(root)))).flat();
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
@@ -2851,6 +3165,7 @@ var LEGACY_DEFAULT_COLLECTOR_URLS = /* @__PURE__ */ new Set([
   "http://10.161.248.127:18080/"
 ]);
 var lastCopilotCaptureDiagnostics;
+var QUEUE_FLUSH_TOOLS = ["copilot", "claude", "codex", "git"];
 function workspacePath() {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 }
@@ -2870,7 +3185,6 @@ function config() {
     token: tinyAiToolEnvValue("copilot", "TOKEN", workspacePath()) || cfg.get("token") || "",
     userName: cfg.get("userName")?.trim() || tinyAiToolEnvValue("copilot", "USER_NAME", workspacePath()) || "",
     userId: cfg.get("userId")?.trim() || tinyAiToolEnvValue("copilot", "USER_ID", workspacePath()) || "",
-    userEmail: cfg.get("userEmail")?.trim() || tinyAiToolEnvValue("copilot", "USER_EMAIL", workspacePath()) || "",
     team: cfg.get("team")?.trim() || tinyAiToolEnvValue("copilot", "TEAM", workspacePath()) || "",
     captureConversationText: cfg.get("captureConversationText") ?? true,
     captureVisibleReasoningText: cfg.get("captureVisibleReasoningText") ?? false,
@@ -2878,8 +3192,9 @@ function config() {
     autoCaptureClaudeLocalTranscripts: cfg.get("autoCaptureClaudeLocalTranscripts") ?? true,
     autoCaptureCopilotCodeChanges: cfg.get("autoCaptureCopilotCodeChanges") ?? true,
     enableClaudeWorkspaceDiffFallback: cfg.get("enableClaudeWorkspaceDiffFallback") ?? false,
-    autoInstallGitHooks: cfg.get("autoInstallGitHooks") ?? true,
-    autoCaptureRecentMinutes: cfg.get("autoCaptureRecentMinutes") ?? 30
+    autoInstallGitHooks: (cfg.get("autoInstallGitHooks") ?? true) && tinyAiAutoInstallGitHooksEnabled(workspacePath()),
+    autoCaptureRecentMinutes: cfg.get("autoCaptureRecentMinutes") ?? 30,
+    queueFlushIntervalSeconds: cfg.get("queueFlushIntervalSeconds") ?? 30
   };
 }
 async function migrateLegacyCollectorUrl() {
@@ -2889,9 +3204,10 @@ async function migrateLegacyCollectorUrl() {
     await settings.update("collectorUrl", DEFAULT_COLLECTOR_URL, vscode.ConfigurationTarget.Global);
   }
 }
-var PLUGIN_VERSION = "0.1.47";
+var PLUGIN_VERSION = "0.1.50";
 function pluginNameForTool(tool) {
   if (tool === "codex") return "tinyai-observability-codex";
+  if (tool === "git") return "tinyai-observability-git-hook";
   return "tinyai-observability-vscode";
 }
 function client(tool = "copilot") {
@@ -2923,15 +3239,12 @@ function slugIdentity(value) {
 function userIdentity() {
   const cfg = config();
   const gitName = gitConfigValue("user.name");
-  const gitEmail = gitConfigValue("user.email");
   const displayName = cfg.userName || process.env.TINYAI_OBS_USER_NAME || process.env.TINYAI_OBS_USER_DISPLAY_NAME || gitName || "";
-  const email = cfg.userEmail || process.env.TINYAI_OBS_USER_EMAIL || gitEmail || "";
-  const userId = cfg.userId || process.env.TINYAI_OBS_USER_ID || email || (displayName ? slugIdentity(displayName) : "");
+  const userId = cfg.userId || process.env.TINYAI_OBS_USER_ID || (displayName ? slugIdentity(displayName) : "");
   const host = hostname();
   return {
     username: displayName || process.env.USER || process.env.USERNAME || "unknown",
     user_id: userId || void 0,
-    user_email: email || void 0,
     user_display_name: displayName || void 0,
     team: cfg.team || process.env.TINYAI_OBS_TEAM || void 0,
     machine_id: vscode.env.machineId ? hashText3(vscode.env.machineId) : void 0,
@@ -3061,6 +3374,7 @@ function codeEditFromReplacement(filePathInput, oldStringInput, newStringInput, 
     sensitive: isSensitiveCodePath(filePath),
     lines_added: added.length,
     lines_deleted: removed.length,
+    line_number_basis: "relative",
     source,
     tool_name: toolName,
     hunks: [
@@ -3093,6 +3407,7 @@ function codeEditsFromApplyPatch(patchInput, source, toolName) {
         sensitive: isSensitiveCodePath(filePath),
         lines_added: 0,
         lines_deleted: 0,
+        line_number_basis: rawLine.startsWith("*** Add File: ") ? "absolute" : "relative",
         source,
         tool_name: toolName || "apply_patch",
         hunks: [{ old_start: 1, old_lines: 0, new_start: 1, new_lines: 0, lines: [] }]
@@ -3103,6 +3418,14 @@ function codeEditsFromApplyPatch(patchInput, source, toolName) {
     }
     if (!current) continue;
     if (rawLine.startsWith("@@")) {
+      const hunkMatch = rawLine.match(/^@@(?:\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?)?/);
+      if (hunkMatch?.[1]) {
+        oldLine = Number(hunkMatch[1]);
+        newLine = Number(hunkMatch[2] || 1);
+        current.line_number_basis = "absolute";
+      } else if (current.line_number_basis !== "absolute") {
+        current.line_number_basis = "relative";
+      }
       const hunk2 = { old_start: oldLine, old_lines: 0, new_start: newLine, new_lines: 0, lines: [] };
       current.hunks.push(hunk2);
       continue;
@@ -3276,6 +3599,7 @@ function editorDeltaFiles(entries) {
       lines_deleted: 0,
       change_count: 0,
       changes: [],
+      line_number_basis: "absolute",
       source: "vscode_text_change_buffer",
       first_occurred_at: entry.occurred_at,
       last_occurred_at: entry.occurred_at
@@ -3383,11 +3707,11 @@ function terminalCommandEditsSpecs(command) {
   return /\b(write_text|writeFileSync|writeFile|appendFile|open\s*\([^)]*['"]w|tee\s+)|>\s*(?:['"])?[^\n]*openspec\/specs\//i.test(command);
 }
 function projectSpecRootCandidates(cwd3) {
-  return [...new Set([join5(cwd3, PROJECT_SPEC_ROOT), PROJECT_SPEC_ABSOLUTE_ROOT].map((item) => item.replace(/\\/g, "/").replace(/\/$/, "")))];
+  return [...new Set([join6(cwd3, PROJECT_SPEC_ROOT), PROJECT_SPEC_ABSOLUTE_ROOT].map((item) => item.replace(/\\/g, "/").replace(/\/$/, "")))];
 }
 async function projectSpecFileEntries(cwd3) {
   async function visit(root, relativeDir) {
-    const absoluteDir = relativeDir ? join5(root, relativeDir) : root;
+    const absoluteDir = relativeDir ? join6(root, relativeDir) : root;
     let entries;
     try {
       entries = await readdir3(absoluteDir, { withFileTypes: true });
@@ -3402,7 +3726,7 @@ async function projectSpecFileEntries(cwd3) {
       } else if (entry.isFile()) {
         results.push({
           doc_path: `${PROJECT_SPEC_ROOT}/${relativePath}`.replace(/\\/g, "/"),
-          absolute_path: join5(root, relativePath)
+          absolute_path: join6(root, relativePath)
         });
       }
     }
@@ -3452,7 +3776,7 @@ async function specAccessesFromCopilotTurn(snapshot, cwd3) {
     if (SPEC_DIRECTORY_TOOLS.has(toolName)) {
       const pathArg = toolPathArgument(args);
       const normalized = pathArg?.replace(/^file:\/\//, "").replace(/\\/g, "/").replace(/\/$/, "");
-      const cwdRoot = join5(cwd3, PROJECT_SPEC_ROOT).replace(/\\/g, "/").replace(/\/$/, "");
+      const cwdRoot = join6(cwd3, PROJECT_SPEC_ROOT).replace(/\\/g, "/").replace(/\/$/, "");
       if (normalized === PROJECT_SPEC_ROOT || normalized === cwdRoot || normalized?.endsWith(`/${PROJECT_SPEC_ROOT}`)) {
         addSpecAccess(accesses, PROJECT_SPEC_ROOT, "read", "tool_call", toolName, occurredAt, await listProjectSpecFiles(cwd3), sourceKey);
       }
@@ -3505,16 +3829,39 @@ function collectCodePathsFromUnknown(value, output, rootPath = workspacePath()) 
   }
   for (const item of Object.values(record4)) collectCodePathsFromUnknown(item, output, rootPath);
 }
-function hasExternalFileWriteSignal(snapshot) {
-  const haystack = JSON.stringify({
-    user: snapshot.user_message,
-    assistant: snapshot.assistant_message,
-    steps: snapshot.process_steps,
-    tools: snapshot.tool_calls
-  }).toLowerCase();
-  return /(run_in_terminal|terminal|shell|bash|zsh|python\d?|node|ruby|perl|执行命令|运行命令|脚本|写入文件|追加)/i.test(haystack);
+var COPILOT_EDIT_TOOL_RE = /(?:replace_string_in_file|multi_replace_string_in_file|create_file|insert_edit|write_file|edit_file|apply_patch)/i;
+var COPILOT_TERMINAL_TOOL_RE = /(?:run_in_terminal|terminal|shell|bash|zsh|powershell|cmd)/i;
+var COPILOT_TERMINAL_WRITE_RE = /(?:write_text|writefilesync|writefile|appendfile|open\s*\([^)]*['"]w|(?<![0-9])>>|(?<![0-9])>\s*[^&]|\btee\s+|\bsed\s+-i\b|\bperl\s+-pi\b|\btouch\s+|\bcp\s+|\bmv\s+|\brm\s+)/i;
+function terminalTextFromUnknown(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(terminalTextFromUnknown).filter(Boolean).join("\n");
+  if (value && typeof value === "object") {
+    return Object.values(value).map(terminalTextFromUnknown).filter(Boolean).join("\n");
+  }
+  return "";
 }
-function turnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries, rootPath = workspacePath()) {
+function copilotToolName(value) {
+  if (!value || typeof value !== "object") return "";
+  const record4 = value;
+  return readableValue(record4.tool_name || record4.toolName || record4.toolId || record4.name || "");
+}
+function isCopilotWriteToolCall(value) {
+  if (!value || typeof value !== "object") return false;
+  const record4 = value;
+  const toolName = copilotToolName(record4);
+  if (COPILOT_EDIT_TOOL_RE.test(toolName)) return true;
+  if (!COPILOT_TERMINAL_TOOL_RE.test(toolName)) return false;
+  return COPILOT_TERMINAL_WRITE_RE.test(terminalTextFromUnknown(record4.arguments_raw ?? record4.arguments ?? record4.input ?? record4.command ?? ""));
+}
+function copilotWriteToolCalls(snapshot) {
+  const calls = Array.isArray(snapshot.tool_calls) ? snapshot.tool_calls : [];
+  return calls.filter(isCopilotWriteToolCall);
+}
+function hasWorkspaceDiffBaselineForTurn() {
+  return false;
+}
+function copilotTurnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries, writeToolCalls, rootPath = workspacePath()) {
   const paths = /* @__PURE__ */ new Set();
   for (const file of [...toolFiles, ...editorFiles]) {
     const normalized = normalizeTurnDiffPath(file.file_path, rootPath);
@@ -3524,11 +3871,7 @@ function turnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries,
     const normalized = typeof entry.payload.file_path === "string" ? normalizeTurnDiffPath(entry.payload.file_path, rootPath) : void 0;
     if (normalized) paths.add(normalized);
   }
-  collectCodePathsFromUnknown(snapshot.user_message, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.assistant_message, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.process_steps, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.tool_calls, paths, rootPath);
-  collectCodePathsFromUnknown(snapshot.sub_agents, paths, rootPath);
+  collectCodePathsFromUnknown(writeToolCalls, paths, rootPath);
   collectCodePathsFromUnknown(snapshot.code_changes, paths, rootPath);
   return [...paths].slice(0, 50);
 }
@@ -3539,13 +3882,30 @@ function codeEditsFromCopilotTurn(snapshot) {
   collectCodeEditsFromUnknown(snapshot.sub_agents, edits, "copilot_turn_sub_agents");
   return dedupeCodeEdits(edits);
 }
+async function editorFilesWithCurrentWorkspaceDiff(files) {
+  if (!files.length) return [];
+  const pathByNormalized = /* @__PURE__ */ new Map();
+  for (const file of files) {
+    const normalized = normalizeTurnDiffPath(file.file_path);
+    if (normalized) pathByNormalized.set(normalized, file);
+  }
+  if (pathByNormalized.size === 0) return [];
+  const diff = await currentDiffDetails(workspacePath(), {
+    includeText: false,
+    includeUntracked: true,
+    maxFiles: 100,
+    maxLinesPerFile: 0,
+    paths: [...pathByNormalized.keys()]
+  });
+  const changedPaths = new Set((diff.file_paths || []).map((path) => normalizeTurnDiffPath(path)).filter(Boolean));
+  return [...pathByNormalized.entries()].filter(([path]) => changedPaths.has(path)).map(([, file]) => file);
+}
 async function recordCopilotTurnEditorDelta(snapshot, taskId, turnClientId) {
   if (!config().autoCaptureCopilotCodeChanges) return;
   const toolFiles = codeEditsFromCopilotTurn(snapshot);
-  const toolPaths = new Set(toolFiles.map((file) => file.file_path));
   const editorEntries = bufferedEditorChangesForTurn(snapshot);
-  const editorFiles = editorDeltaFiles(editorEntries).filter((file) => !toolPaths.has(file.file_path));
-  const files = [...toolFiles, ...editorFiles];
+  const editorFiles = await editorFilesWithCurrentWorkspaceDiff(editorDeltaFiles(editorEntries));
+  const files = editorFiles;
   if (files.length > 0) {
     const linesAdded = files.reduce((sum, file) => sum + Number(file.lines_added || 0), 0);
     const linesDeleted = files.reduce((sum, file) => sum + Number(file.lines_deleted || 0), 0);
@@ -3565,8 +3925,8 @@ async function recordCopilotTurnEditorDelta(snapshot, taskId, turnClientId) {
         trigger: "auto_copilot_turn_completed",
         attribution_scope: "turn_delta",
         ai_assisted: true,
-        attribution_evidence: "copilot_turn_tool_calls_or_vscode_editor_changes",
-        capture_strategy: toolFiles.length > 0 && editorFiles.length > 0 ? "tool_call_delta+editor_delta" : toolFiles.length > 0 ? "tool_call_delta" : "editor_delta",
+        attribution_evidence: "vscode_editor_changes_with_current_workspace_diff",
+        capture_strategy: "editor_delta_confirmed_by_workspace_diff",
         files_changed: files.length,
         lines_added: linesAdded,
         lines_deleted: linesDeleted,
@@ -3574,7 +3934,7 @@ async function recordCopilotTurnEditorDelta(snapshot, taskId, turnClientId) {
         truncated: files.some((file) => Boolean(file.truncated)),
         file_paths: files.map((file) => file.file_path).slice(0, 100),
         files,
-        capture_note: "Per-turn code delta captured from Copilot tool-call edit payloads and VS Code text document change events within the request/response time window. This intentionally excludes pre-existing workspace git diff."
+        capture_note: "Per-turn code delta captured from VS Code text document changes within the request/response time window, only for files that still have current workspace diff. Copilot tool-call patches are used only as attribution/path hints because users can undo or reject them."
       },
       "derived",
       stableEventId(
@@ -3586,8 +3946,11 @@ async function recordCopilotTurnEditorDelta(snapshot, taskId, turnClientId) {
   await recordCopilotTurnWorkspaceDiffFallback(snapshot, taskId, turnClientId, toolFiles, editorFiles, editorEntries);
 }
 async function recordCopilotTurnWorkspaceDiffFallback(snapshot, taskId, turnClientId, toolFiles, editorFiles, editorEntries) {
-  if (!hasExternalFileWriteSignal(snapshot)) return;
-  const paths = turnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries);
+  const writeToolCalls = copilotWriteToolCalls(snapshot);
+  if (!writeToolCalls.length) return;
+  if (!hasWorkspaceDiffBaselineForTurn()) return;
+  if (!toolFiles.length && !editorFiles.length && !editorEntries.length) return;
+  const paths = copilotTurnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries, writeToolCalls);
   if (paths.length === 0) return;
   const diff = await currentDiffDetails(workspacePath(), {
     includeText: true,
@@ -3642,15 +4005,19 @@ async function recordCopilotTurnWorkspaceDiffFallback(snapshot, taskId, turnClie
   );
 }
 function codeEditsFromClaudeTurn(snapshot) {
-  const edits = (snapshot.code_changes || []).map((change) => ({
-    file_path: displayPath(String(change.file_path || "")),
-    sensitive: isSensitiveCodePath(String(change.file_path || "")),
-    lines_added: Number(change.lines_added || 0),
-    lines_deleted: Number(change.lines_deleted || 0),
-    hunks: Array.isArray(change.hunks) ? change.hunks : [],
-    source: "claude_turn_tool_patch",
-    tool_name: change.tool_name
-  })).filter((change) => change.file_path && (change.lines_added > 0 || change.lines_deleted > 0 || change.hunks.length > 0));
+  const edits = (snapshot.code_changes || []).map((change) => {
+    const basis = change.line_number_basis === "absolute" ? "absolute" : change.line_number_basis === "relative" ? "relative" : void 0;
+    return {
+      file_path: displayPath(String(change.file_path || "")),
+      sensitive: isSensitiveCodePath(String(change.file_path || "")),
+      lines_added: Number(change.lines_added || 0),
+      lines_deleted: Number(change.lines_deleted || 0),
+      hunks: Array.isArray(change.hunks) ? change.hunks : [],
+      line_number_basis: basis,
+      source: "claude_turn_tool_patch",
+      tool_name: change.tool_name
+    };
+  }).filter((change) => change.file_path && (change.lines_added > 0 || change.lines_deleted > 0 || change.hunks.length > 0));
   return dedupeCodeEdits(edits);
 }
 async function recordClaudeTurnEditorDelta(snapshot, taskId, turnClientId) {
@@ -3709,16 +4076,30 @@ async function recordClaudeTurnEditorDelta(snapshot, taskId, turnClientId) {
   }
 }
 async function recordClaudeTurnWorkspaceDiffFallback(snapshot, taskId, turnClientId, toolFiles, editorFiles, editorEntries) {
-  if (!hasExternalFileWriteSignal(snapshot)) return;
+  if (!hasClaudeExternalWriteSignal(snapshot)) return;
+  if (!hasWorkspaceDiffBaselineForTurn()) return;
   const cwd3 = snapshot.cwd || workspacePath();
-  const paths = turnWorkspaceDiffPaths(snapshot, toolFiles, editorFiles, editorEntries, cwd3);
-  if (paths.length === 0) return;
+  const paths = /* @__PURE__ */ new Set();
+  for (const path of claudeWorkspaceDiffPathCandidates(snapshot)) {
+    const normalized = normalizeTurnDiffPath(path, cwd3);
+    if (normalized) paths.add(normalized);
+  }
+  for (const file of [...toolFiles, ...editorFiles]) {
+    const normalized = normalizeTurnDiffPath(file.file_path, cwd3);
+    if (normalized) paths.add(normalized);
+  }
+  for (const entry of editorEntries) {
+    const normalized = typeof entry.payload.file_path === "string" ? normalizeTurnDiffPath(entry.payload.file_path, cwd3) : void 0;
+    if (normalized) paths.add(normalized);
+  }
+  const pathList = [...paths].slice(0, 50);
+  if (pathList.length === 0) return;
   const diff = await currentDiffDetails(cwd3, {
     includeText: true,
     includeUntracked: true,
     maxFiles: 50,
     maxLinesPerFile: EDITOR_DELTA_INLINE_LINE_LIMIT + 1,
-    paths
+    paths: pathList
   });
   if (!diff.files.length || diff.lines_added + diff.lines_deleted === 0) return;
   const totalLines = diff.lines_added + diff.lines_deleted;
@@ -3877,32 +4258,32 @@ function emitConversationSnapshot(sourceConfidence = "derived") {
 }
 function workspaceStorageRoot() {
   if (!extensionContext?.storageUri?.fsPath) return void 0;
-  return dirname3(extensionContext.storageUri.fsPath);
+  return dirname4(extensionContext.storageUri.fsPath);
 }
 async function workspaceStorageRoots() {
   const roots = /* @__PURE__ */ new Set();
   const currentRoot = workspaceStorageRoot();
   if (currentRoot) roots.add(currentRoot);
   const userDataRoots = [
-    join5(homedir3(), "Library", "Application Support", "Code", "User", "workspaceStorage"),
-    join5(homedir3(), "Library", "Application Support", "Code - Insiders", "User", "workspaceStorage"),
-    join5(homedir3(), "Library", "Application Support", "Cursor", "User", "workspaceStorage"),
-    join5(homedir3(), ".config", "Code", "User", "workspaceStorage"),
-    join5(homedir3(), ".config", "Code - Insiders", "User", "workspaceStorage"),
-    join5(homedir3(), ".config", "Cursor", "User", "workspaceStorage")
+    join6(homedir3(), "Library", "Application Support", "Code", "User", "workspaceStorage"),
+    join6(homedir3(), "Library", "Application Support", "Code - Insiders", "User", "workspaceStorage"),
+    join6(homedir3(), "Library", "Application Support", "Cursor", "User", "workspaceStorage"),
+    join6(homedir3(), ".config", "Code", "User", "workspaceStorage"),
+    join6(homedir3(), ".config", "Code - Insiders", "User", "workspaceStorage"),
+    join6(homedir3(), ".config", "Cursor", "User", "workspaceStorage")
   ];
   if (process.env.APPDATA) {
     userDataRoots.push(
-      join5(process.env.APPDATA, "Code", "User", "workspaceStorage"),
-      join5(process.env.APPDATA, "Code - Insiders", "User", "workspaceStorage"),
-      join5(process.env.APPDATA, "Cursor", "User", "workspaceStorage")
+      join6(process.env.APPDATA, "Code", "User", "workspaceStorage"),
+      join6(process.env.APPDATA, "Code - Insiders", "User", "workspaceStorage"),
+      join6(process.env.APPDATA, "Cursor", "User", "workspaceStorage")
     );
   }
   for (const candidate of userDataRoots) {
     try {
       const entries = await readdir3(candidate, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isDirectory()) roots.add(join5(candidate, entry.name));
+        if (entry.isDirectory()) roots.add(join6(candidate, entry.name));
       }
     } catch {
     }
@@ -3914,7 +4295,7 @@ async function listJsonlFiles(dir, transcriptKind) {
     const entries = await readdir3(dir, { withFileTypes: true });
     const files = await Promise.all(
       entries.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl")).map(async (entry) => {
-        const path = join5(dir, entry.name);
+        const path = join6(dir, entry.name);
         const info = await stat3(path);
         return { path, transcriptKind, mtimeMs: info.mtimeMs, size: info.size };
       })
@@ -3935,7 +4316,7 @@ async function listJsonlFilesRecursive(dir, transcriptKind, maxDepth = 3) {
       return;
     }
     for (const entry of entries) {
-      const full = join5(current, entry.name);
+      const full = join6(current, entry.name);
       if (entry.isDirectory()) {
         await visit(full, depth + 1);
       } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
@@ -3952,18 +4333,18 @@ async function listJsonlFilesRecursive(dir, transcriptKind, maxDepth = 3) {
 }
 async function globalChatSessionFiles() {
   const roots = [
-    join5(homedir3(), "Library", "Application Support", "Code", "User", "globalStorage", "emptyWindowChatSessions"),
-    join5(homedir3(), "Library", "Application Support", "Code - Insiders", "User", "globalStorage", "emptyWindowChatSessions"),
-    join5(homedir3(), "Library", "Application Support", "Cursor", "User", "globalStorage", "emptyWindowChatSessions"),
-    join5(homedir3(), ".config", "Code", "User", "globalStorage", "emptyWindowChatSessions"),
-    join5(homedir3(), ".config", "Code - Insiders", "User", "globalStorage", "emptyWindowChatSessions"),
-    join5(homedir3(), ".config", "Cursor", "User", "globalStorage", "emptyWindowChatSessions")
+    join6(homedir3(), "Library", "Application Support", "Code", "User", "globalStorage", "emptyWindowChatSessions"),
+    join6(homedir3(), "Library", "Application Support", "Code - Insiders", "User", "globalStorage", "emptyWindowChatSessions"),
+    join6(homedir3(), "Library", "Application Support", "Cursor", "User", "globalStorage", "emptyWindowChatSessions"),
+    join6(homedir3(), ".config", "Code", "User", "globalStorage", "emptyWindowChatSessions"),
+    join6(homedir3(), ".config", "Code - Insiders", "User", "globalStorage", "emptyWindowChatSessions"),
+    join6(homedir3(), ".config", "Cursor", "User", "globalStorage", "emptyWindowChatSessions")
   ];
   if (process.env.APPDATA) {
     roots.push(
-      join5(process.env.APPDATA, "Code", "User", "globalStorage", "emptyWindowChatSessions"),
-      join5(process.env.APPDATA, "Code - Insiders", "User", "globalStorage", "emptyWindowChatSessions"),
-      join5(process.env.APPDATA, "Cursor", "User", "globalStorage", "emptyWindowChatSessions")
+      join6(process.env.APPDATA, "Code", "User", "globalStorage", "emptyWindowChatSessions"),
+      join6(process.env.APPDATA, "Code - Insiders", "User", "globalStorage", "emptyWindowChatSessions"),
+      join6(process.env.APPDATA, "Cursor", "User", "globalStorage", "emptyWindowChatSessions")
     );
   }
   const files = await Promise.all(roots.map((root) => listJsonlFiles(root, "vscode-empty-window-chat-session")));
@@ -4026,11 +4407,11 @@ async function sourceFileInfo(path, mtimeMs, size, content, readOffset = 0) {
 }
 function copilotCheckpointDir() {
   const root = extensionContext?.globalStorageUri?.fsPath;
-  return root ? join5(root, "copilot-checkpoints") : void 0;
+  return root ? join6(root, "copilot-checkpoints") : void 0;
 }
 function copilotCheckpointPath(sessionKey) {
   const dir = copilotCheckpointDir();
-  return dir ? join5(dir, `${hashText3(sessionKey)}.json`) : void 0;
+  return dir ? join6(dir, `${hashText3(sessionKey)}.json`) : void 0;
 }
 function checkpointHash(checkpoint) {
   return fullHashText(JSON.stringify({
@@ -4094,8 +4475,8 @@ async function captureCopilotLocalTranscripts(options = {}) {
   const newestAllowedMtime = options.includeHistory ? 0 : Date.now() - maxAgeMs;
   const workspaceFiles = (await Promise.all(
     roots.map(async (root) => [
-      ...await listJsonlFiles(join5(root, "GitHub.copilot-chat", "transcripts"), "github-copilot-transcript"),
-      ...await listJsonlFiles(join5(root, "chatSessions"), "vscode-chat-session")
+      ...await listJsonlFiles(join6(root, "GitHub.copilot-chat", "transcripts"), "github-copilot-transcript"),
+      ...await listJsonlFiles(join6(root, "chatSessions"), "vscode-chat-session")
     ])
   )).flat();
   const files = [...await globalChatSessionFiles(), ...workspaceFiles].filter((file) => file.mtimeMs >= newestAllowedMtime).sort((left, right) => right.mtimeMs - left.mtimeMs);
@@ -4288,8 +4669,8 @@ async function claudeJsonlFiles(options = {}) {
   const maxAgeMs = Math.max(1, cfg.autoCaptureRecentMinutes) * 6e4;
   const newestAllowedMtime = options.includeHistory ? 0 : Date.now() - maxAgeMs;
   const roots = [
-    join5(homedir3(), ".claude", "projects"),
-    join5(homedir3(), ".claude", "transcripts")
+    join6(homedir3(), ".claude", "projects"),
+    join6(homedir3(), ".claude", "transcripts")
   ];
   const files = (await Promise.all(roots.map((root) => listJsonlFilesRecursive(root, "claude-project-jsonl", 4)))).flat().filter((file) => !file.path.replace(/\\/g, "/").toLowerCase().includes("/subagents/")).filter((file) => file.mtimeMs >= newestAllowedMtime).sort((left, right) => right.mtimeMs - left.mtimeMs);
   return files;
@@ -4465,6 +4846,15 @@ async function flush() {
   }
   return merged;
 }
+async function flushDiskQueues() {
+  for (const tool of QUEUE_FLUSH_TOOLS) {
+    try {
+      await client(tool).flushQueue(tool);
+    } catch (error) {
+      console.warn(`TinyAI Observability failed to flush ${tool} queue`, error);
+    }
+  }
+}
 async function heartbeat() {
   const cfg = config();
   const identity = userIdentity();
@@ -4475,6 +4865,7 @@ async function heartbeat() {
       user_id: identity.user_id || identity.username,
       auto_capture: cfg.autoCaptureCopilotLocalTranscripts,
       auto_capture_claude: cfg.autoCaptureClaudeLocalTranscripts,
+      queue_flush_interval_seconds: cfg.queueFlushIntervalSeconds,
       capture_text: cfg.captureConversationText,
       capture_reasoning: cfg.captureVisibleReasoningText,
       recent_minutes: cfg.autoCaptureRecentMinutes
@@ -4487,6 +4878,7 @@ async function heartbeat() {
       activation: "vscode",
       auto_capture_copilot_local_transcripts: config().autoCaptureCopilotLocalTranscripts,
       auto_capture_claude_local_transcripts: config().autoCaptureClaudeLocalTranscripts,
+      queue_flush_interval_seconds: config().queueFlushIntervalSeconds,
       capture_conversation_text: config().captureConversationText,
       capture_visible_reasoning_text: config().captureVisibleReasoningText,
       auto_capture_recent_minutes: config().autoCaptureRecentMinutes,
@@ -4502,7 +4894,7 @@ async function heartbeat() {
 function updateStatus() {
   const cfg = config();
   statusBar.text = currentTaskId ? "TinyAI Obs: Task" : "TinyAI Obs: Auto";
-  statusBar.tooltip = currentTaskId ? `Current task: ${currentTaskId}` : cfg.autoCaptureCopilotLocalTranscripts || cfg.autoCaptureClaudeLocalTranscripts ? `Auto-capturing recent Copilot/Claude sessions every 15s; window: ${cfg.autoCaptureRecentMinutes} min.` : "TinyAI automatic transcript capture is disabled.";
+  statusBar.tooltip = currentTaskId ? `Current task: ${currentTaskId}` : cfg.autoCaptureCopilotLocalTranscripts || cfg.autoCaptureClaudeLocalTranscripts ? `Auto-capturing recent Copilot/Claude sessions every 15s; queue flush every ${Math.max(5, cfg.queueFlushIntervalSeconds)}s; window: ${cfg.autoCaptureRecentMinutes} min.` : `TinyAI transcript capture is disabled; queue flush still runs every ${Math.max(5, cfg.queueFlushIntervalSeconds)}s.`;
   statusBar.command = "tinyaiObservability.showMenu";
   panelProvider?.refresh();
 }
@@ -4719,17 +5111,20 @@ async function adoptionSnapshot() {
   await flush();
 }
 async function recordCommitSnapshot(options = {}) {
-  await ensureTask("commit_snapshot");
   const snapshot = await commitSnapshot(workspacePath(), "HEAD", {
     aiAssisted: true,
     attributionEvidence: "manual_vscode_commit_snapshot"
   });
-  event(
-    "commit_snapshot",
-    { ...snapshot, source: "vscode_command" },
-    "derived",
-    snapshot.commit_sha ? stableEventId(`copilot:commit_snapshot:${workspacePath()}:${snapshot.commit_sha}`) : void 0
-  );
+  pendingEvents.push(makeEvent({
+    tool: "git",
+    eventType: "commit_snapshot",
+    taskId: snapshot.commit_sha ? `commit-${snapshot.commit_sha.slice(0, 16)}` : void 0,
+    workspacePath: workspacePath(),
+    payload: { ...snapshot, source: "vscode_command", hook_tool: "git", hook_installer_tool: "copilot" },
+    sourceConfidence: "derived",
+    eventId: snapshot.commit_sha ? stableEventId(`git:commit_snapshot:${workspacePath()}:${snapshot.commit_sha}`) : void 0,
+    userIdentity: userIdentity()
+  }));
   updateStatus();
   await flush();
   if (!options.silent) {
@@ -4752,27 +5147,6 @@ async function recordAiLinesSnapshot(options = {}) {
     vscode.window.showInformationMessage(`TinyAI recorded ${snapshot.recorded_lines} AI line fingerprint(s).`);
   }
 }
-async function recordPushSnapshot(options = {}) {
-  await ensureTask("push_snapshot");
-  const snapshot = await pushSnapshot(workspacePath(), {
-    aiAssisted: true,
-    attributionEvidence: "manual_vscode_push_snapshot"
-  });
-  const rangeKey = snapshot.head_sha ? `${snapshot.upstream_ref || ""}:${snapshot.base_sha || ""}:${snapshot.head_sha}` : "";
-  event(
-    "push_snapshot",
-    { ...snapshot, source: "vscode_command" },
-    "derived",
-    rangeKey ? stableEventId(`copilot:push_snapshot:${workspacePath()}:${rangeKey}`) : void 0
-  );
-  updateStatus();
-  await flush();
-  if (!options.silent) {
-    vscode.window.showInformationMessage(
-      `TinyAI recorded push/PR snapshot: ${snapshot.ai_lines_added} AI-added line(s), ${snapshot.commit_count} commit(s).`
-    );
-  }
-}
 async function installGitHooksForWorkspace(options = {}) {
   try {
     const cfg = config();
@@ -4791,14 +5165,14 @@ async function installGitHooksForWorkspace(options = {}) {
           activation: options.silent ? "git_hooks_auto_install" : "git_hooks_install",
           installed_hooks: result.installed,
           git_dir: result.git_dir,
-          hook_events: ["commit_snapshot", "push_snapshot"]
+          hook_events: ["commit_snapshot"]
         },
         "direct"
       );
       await flush();
     }
     if (!options.silent) {
-      vscode.window.showInformationMessage("TinyAI installed Git hooks for automatic commit/push AI code attribution.");
+      vscode.window.showInformationMessage("TinyAI installed Git hooks for automatic commit AI code attribution.");
     }
   } catch (error) {
     if (!options.silent) {
@@ -4841,7 +5215,7 @@ var ObservabilityPanelProvider = class {
       cfg.autoCaptureCopilotLocalTranscripts ? "Copilot" : void 0,
       cfg.autoCaptureClaudeLocalTranscripts ? "Claude" : void 0
     ].filter(Boolean).join(" / ");
-    const autoText = enabledSources ? `\u5DF2\u5F00\u542F\uFF0C\u6BCF 15 \u79D2\u626B\u63CF\u6700\u8FD1 ${cfg.autoCaptureRecentMinutes} \u5206\u949F\u7684 ${enabledSources} \u672C\u5730\u4F1A\u8BDD\u3002` : "\u5DF2\u5173\u95ED\uFF0C\u53EF\u5728\u8BBE\u7F6E\u91CC\u5F00\u542F autoCaptureCopilotLocalTranscripts \u6216 autoCaptureClaudeLocalTranscripts\u3002";
+    const autoText = enabledSources ? `\u5DF2\u5F00\u542F\uFF0C\u6BCF 15 \u79D2\u626B\u63CF\u6700\u8FD1 ${cfg.autoCaptureRecentMinutes} \u5206\u949F\u7684 ${enabledSources} \u672C\u5730\u4F1A\u8BDD\uFF1B\u672C\u5730\u5931\u8D25\u961F\u5217\u6BCF ${Math.max(5, cfg.queueFlushIntervalSeconds)} \u79D2\u72EC\u7ACB\u8865\u53D1\u3002` : `\u4F1A\u8BDD\u81EA\u52A8\u626B\u63CF\u5DF2\u5173\u95ED\uFF1B\u672C\u5730\u5931\u8D25\u961F\u5217\u4ECD\u6BCF ${Math.max(5, cfg.queueFlushIntervalSeconds)} \u79D2\u72EC\u7ACB\u8865\u53D1\u3002`;
     const collectorLabel = cfg.collectorUrl || DEFAULT_COLLECTOR_URL;
     return (
       /* html */
@@ -4973,7 +5347,6 @@ function activate(context) {
   context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.captureClaudeLocalTranscripts", () => captureClaudeLocalTranscripts()));
   context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.recordCommitSnapshot", () => recordCommitSnapshot()));
   context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.recordAiLinesSnapshot", () => recordAiLinesSnapshot()));
-  context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.recordPushSnapshot", () => recordPushSnapshot()));
   context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.installGitHooks", () => installGitHooksForWorkspace()));
   context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.recordFeedback", recordFeedback));
   context.subscriptions.push(vscode.commands.registerCommand("tinyaiObservability.adoptionSnapshot", adoptionSnapshot));
@@ -5006,6 +5379,10 @@ function activate(context) {
   });
   void remindMissingUserName(context);
   void heartbeat();
+  void flushDiskQueues();
+  const queueFlushIntervalMs = Math.max(5, config().queueFlushIntervalSeconds) * 1e3;
+  const queueFlushTimer = setInterval(() => void flushDiskQueues(), queueFlushIntervalMs);
+  context.subscriptions.push({ dispose: () => clearInterval(queueFlushTimer) });
   if (config().autoInstallGitHooks) {
     void installGitHooksForWorkspace({ silent: true, emitHeartbeat: false });
   }

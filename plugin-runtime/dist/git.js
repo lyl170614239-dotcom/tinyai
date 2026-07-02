@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { DEFAULT_TINYAI_ENV_FILE, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool } from "./config.js";
+import { resolvePluginVersion } from "./plugin-version.js";
 import { redactText } from "./redactor.js";
 const execFileAsync = promisify(execFile);
 async function git(workspacePath, args, timeout = 10000) {
@@ -173,6 +174,7 @@ function parseUnifiedDiffDetails(diff, options = {}) {
                 file_path: filePath,
                 old_path: pendingOldPath,
                 sensitive: isSensitiveDiffPath(filePath),
+                line_number_basis: "absolute",
                 lines_added: 0,
                 lines_deleted: 0,
                 hunks: []
@@ -209,6 +211,7 @@ function parseUnifiedDiffDetails(diff, options = {}) {
     const filePaths = files.map((file) => file.file_path).filter(Boolean);
     return {
         snapshot_kind: "workspace_diff",
+        line_number_basis: "absolute",
         diff_hash: createHash("sha256").update(diff).digest("hex").slice(0, 32),
         include_text: includeText,
         truncated,
@@ -441,6 +444,7 @@ export async function currentDiffDetails(workspacePath, options = {}) {
     catch {
         return {
             snapshot_kind: "workspace_diff",
+            line_number_basis: "absolute",
             diff_hash: "",
             diff_raw: undefined,
             include_text: options.includeText ?? true,
@@ -517,15 +521,32 @@ export async function currentHead(workspacePath) {
         return undefined;
     }
 }
+async function commitIdentity(workspacePath, ref = "HEAD") {
+    try {
+        const raw = await git(workspacePath, ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", ref]);
+        const [authorName, authorEmail, committerName, committerEmail] = raw.split("\0");
+        return {
+            git_author_name: authorName || undefined,
+            git_author_email: authorEmail || undefined,
+            git_committer_name: committerName || undefined,
+            git_committer_email: committerEmail || undefined
+        };
+    }
+    catch {
+        return {};
+    }
+}
 export async function commitSnapshot(workspacePath, ref = "HEAD", options = {}) {
     try {
         const summary = parseNumstat(await git(workspacePath, ["show", "--numstat", "--format=", ref, "--", "."]));
         const attr = await attribution(workspacePath, options);
         const diffRaw = await git(workspacePath, ["show", "--unified=3", "--no-color", "--format=", ref, "--", "."], 30000);
         const diffDetails = parseUnifiedDiffDetails(diffRaw, { includeText: true, maxFiles: 1000, maxLinesPerFile: 20000 });
+        const identity = await commitIdentity(workspacePath, ref);
         return {
             ...summary,
             commit_sha: await git(workspacePath, ["rev-parse", ref]),
+            ...identity,
             branch: await currentBranch(workspacePath),
             snapshot_kind: "commit",
             diff_hash: diffDetails.diff_hash,
@@ -572,86 +593,12 @@ export async function commitSnapshot(workspacePath, ref = "HEAD", options = {}) 
         };
     }
 }
-async function upstreamRef(workspacePath) {
-    try {
-        return await git(workspacePath, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-    }
-    catch {
-        return undefined;
-    }
-}
-async function commitCount(workspacePath, range) {
-    try {
-        return Number.parseInt(await git(workspacePath, ["rev-list", "--count", range]), 10) || 0;
-    }
-    catch {
-        return 0;
-    }
-}
-export async function pushSnapshot(workspacePath, options = {}) {
-    const branch = await currentBranch(workspacePath);
-    const headSha = await currentHead(workspacePath);
-    const attr = await attribution(workspacePath, options);
-    const upstream = await upstreamRef(workspacePath);
-    if (!upstream || !headSha) {
-        return {
-            files_changed: 0,
-            lines_added: 0,
-            lines_deleted: 0,
-            file_paths: [],
-            branch,
-            head_sha: headSha,
-            commit_count: 0,
-            snapshot_kind: "push",
-            ...attr,
-            ai_lines_added: 0,
-            ai_lines_deleted: 0,
-            ai_attribution_method: "push_range_diff_attributed_to_recent_ai_task"
-        };
-    }
-    try {
-        const baseSha = await git(workspacePath, ["merge-base", "HEAD", upstream]);
-        const range = `${baseSha}..HEAD`;
-        const summary = parseNumstat(await git(workspacePath, ["diff", "--numstat", range, "--", "."]));
-        return {
-            ...summary,
-            branch,
-            upstream_ref: upstream,
-            base_sha: baseSha,
-            head_sha: headSha,
-            commit_count: await commitCount(workspacePath, range),
-            snapshot_kind: "push",
-            ...attr,
-            ai_lines_added: attr.ai_assisted ? summary.lines_added : 0,
-            ai_lines_deleted: attr.ai_assisted ? summary.lines_deleted : 0,
-            ai_attribution_method: "push_range_diff_attributed_to_recent_ai_task"
-        };
-    }
-    catch {
-        return {
-            files_changed: 0,
-            lines_added: 0,
-            lines_deleted: 0,
-            file_paths: [],
-            branch,
-            upstream_ref: upstream,
-            head_sha: headSha,
-            commit_count: 0,
-            snapshot_kind: "push",
-            ...attr,
-            ai_lines_added: 0,
-            ai_lines_deleted: 0,
-            ai_attribution_method: "push_range_diff_attributed_to_recent_ai_task"
-        };
-    }
-}
 export async function installGitHooks(workspacePath, options) {
     const gitDir = await resolvedGitDir(workspacePath);
     const hooksDir = join(gitDir, "hooks");
     await mkdir(hooksDir, { recursive: true });
     const hookScript = fileURLToPath(new URL("./hook.js", import.meta.url));
     const envFile = options.envFile || process.env.TINYAI_OBS_ENV_FILE || DEFAULT_TINYAI_ENV_FILE;
-    const hookTool = process.env.TINYAI_OBS_GIT_HOOK_TOOL || "copilot";
     const fallbackUrls = (options.fallbackUrls && options.fallbackUrls.length > 0 ? options.fallbackUrls : tinyAiCollectorFallbackUrlsForTool(options.tool, workspacePath)).filter(Boolean);
     const fallbackEnv = fallbackUrls.length > 0 ? fallbackUrls.join(",") : process.env.TINYAI_OBS_COLLECTOR_URLS;
     const setupLines = [
@@ -662,23 +609,21 @@ export async function installGitHooks(workspacePath, options) {
         options.token || process.env.TINYAI_OBS_TOKEN ? `if [ -z "$\{TINYAI_OBS_TOKEN:-}" ]; then TINYAI_OBS_TOKEN=${shellQuote(options.token || process.env.TINYAI_OBS_TOKEN || "")}; fi` : "",
         `export TINYAI_OBS_ENV_FILE TINYAI_OBS_COLLECTOR_URL TINYAI_OBS_COLLECTOR_URLS TINYAI_OBS_TOKEN`,
         `export TINYAI_OBS_WORKSPACE=${shellQuote(workspacePath)}`,
-        `if [ -z "$\{TINYAI_OBS_GIT_HOOK_TOOL:-}" ]; then TINYAI_OBS_GIT_HOOK_TOOL=${shellQuote(hookTool)}; fi`,
+        `TINYAI_OBS_GIT_HOOK_TOOL='git'`,
         `export TINYAI_OBS_TOOL="$TINYAI_OBS_GIT_HOOK_TOOL"`,
         `export TINYAI_OBS_HOOK_INSTALLER_TOOL=${shellQuote(options.tool)}`,
-        `export TINYAI_OBS_PLUGIN_VERSION=${shellQuote(options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0")}`
+        `export TINYAI_OBS_PLUGIN_VERSION=${shellQuote(resolvePluginVersion(options.pluginVersion))}`
     ];
     const setupScript = setupLines.filter(Boolean).join("; ");
     const postCommit = managedHookBlock("record commit diff evidence for server-side AI attribution", `${setupScript}; TINYAI_OBS_EVENT_TYPE=commit_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true`);
-    const prePush = managedHookBlock("record AI-attributed branch diff before push", `${setupScript}; TINYAI_OBS_EVENT_TYPE=push_snapshot node ${shellQuote(hookScript)} >/dev/null 2>&1 || true`);
     const preCommitPath = join(hooksDir, "pre-commit");
     const postCommitPath = join(hooksDir, "post-commit");
     const prePushPath = join(hooksDir, "pre-push");
     await removeManagedHook(preCommitPath);
     await writeManagedHook(postCommitPath, postCommit);
-    await writeManagedHook(prePushPath, prePush);
+    await removeManagedHook(prePushPath);
     await chmod(postCommitPath, 0o755);
-    await chmod(prePushPath, 0o755);
-    return { installed: [postCommitPath, prePushPath], git_dir: dirname(hooksDir) };
+    return { installed: [postCommitPath], git_dir: dirname(hooksDir) };
 }
 function shellQuote(value) {
     return `'${value.replace(/'/g, "'\\''")}'`;

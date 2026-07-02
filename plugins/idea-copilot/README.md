@@ -83,7 +83,7 @@ In IDEA:
 3. Select the generated plugin zip.
 4. Restart IDEA.
 5. Open `Settings | Tools | TinyAI Observability`.
-6. Set name, optional email/user ID, collector URL, and optional Copilot log roots.
+6. Set name, optional user ID, collector URL, and optional Copilot log roots.
 
 ## Notes
 

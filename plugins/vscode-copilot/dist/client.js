@@ -2,12 +2,15 @@ import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { DEFAULT_COLLECTOR_URL, loadTinyAiEnvFile, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool, tinyAiQueuePathForTool } from "./config.js";
 import { clientId, resolveModel, resolveUserIdentity } from "./event-schema.js";
+import { resolvePluginVersion } from "./plugin-version.js";
 import { redact } from "./redactor.js";
-import { enqueueBatch, readQueuedBatches, replaceQueue } from "./queue.js";
+import { deadLetterBatch, enqueueBatch, readQueuedEntries, replaceQueueEntries } from "./queue.js";
 loadTinyAiEnvFile();
 const TURN_BLOB_INLINE_LIMIT = Number(process.env.TINYAI_OBS_TURN_BLOB_INLINE_LIMIT || 64 * 1024);
 const TURN_BLOB_CHUNK_BYTES = Number(process.env.TINYAI_OBS_TURN_BLOB_CHUNK_BYTES || 256 * 1024);
 const TURN_TEXT_PREVIEW_CHARS = Number(process.env.TINYAI_OBS_TURN_TEXT_PREVIEW_CHARS || 2000);
+const QUEUE_FLUSH_MAX_BATCHES = Math.max(1, Number(process.env.TINYAI_OBS_QUEUE_FLUSH_MAX_BATCHES || 100) || 100);
+const queueFlushes = new Map();
 const RAW_BLOB_KEYS = new Set([
     "arguments_raw",
     "result_raw",
@@ -30,6 +33,8 @@ function defaultPluginNameForTool(tool) {
         return "tinyai-observability-codex";
     if (tool === "copilot")
         return "tinyai-observability-vscode";
+    if (tool === "git")
+        return "tinyai-observability-git-hook";
     return "tinyai-observability";
 }
 function isLocalCollectorUrl(value) {
@@ -187,7 +192,7 @@ function classifyUploadError(error) {
         return "payload_too_large";
     if (/\b401\b|\b403\b|invalid collector token|requires a bearer token|upload blocked/.test(message))
         return "config_error";
-    if (/\b400\b|schema|validation/.test(message))
+    if (/\b400\b|\b422\b|unprocessable entity|schema|validation/.test(message))
         return "schema_error";
     if (/\b429\b|rate limit|too many requests/.test(message))
         return "rate_limited";
@@ -195,9 +200,22 @@ function classifyUploadError(error) {
         return "retryable";
     return "unknown";
 }
+function isPermanentQueueError(category) {
+    return category === "config_error" || category === "schema_error" || category === "payload_too_large";
+}
 function safeErrorMessage(error) {
     const message = error instanceof Error ? error.message : String(error || "collector upload failed");
     return message.slice(0, 500);
+}
+function retryEntry(entry, error, errorCategory) {
+    return {
+        ...entry,
+        retry_count: (entry.retry_count || 0) + 1,
+        last_attempt_at: new Date().toISOString(),
+        last_error: safeErrorMessage(error),
+        error_category: errorCategory,
+        status: "queued"
+    };
 }
 export function uploadResultAllowsCursorCommit(result) {
     if (result.queued)
@@ -228,7 +246,7 @@ export class CollectorClient {
         ]);
         this.token = options.token || process.env.TINYAI_OBS_TOKEN || "";
         this.pluginName = options.pluginName || defaultPluginNameForTool(options.tool);
-        this.pluginVersion = options.pluginVersion || process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0";
+        this.pluginVersion = resolvePluginVersion(options.pluginVersion);
         this.queuePath = options.queuePath;
     }
     makeBatch(tool, events) {
@@ -241,7 +259,7 @@ export class CollectorClient {
             model: resolveModel(),
             events: events.map((event) => ({
                 ...event,
-                payload: event.event_type === "turn_snapshot" || event.event_type === "code_change" || event.event_type === "commit_snapshot" || event.event_type === "push_snapshot"
+                payload: event.event_type === "turn_snapshot" || event.event_type === "code_change" || event.event_type === "commit_snapshot"
                     ? blobifyTurnPayload(event.payload)
                     : redact(event.payload, {
                         allowFullConversationText: (event.event_type === "conversation_snapshot" || event.event_type === "agent_process_snapshot") &&
@@ -260,13 +278,18 @@ export class CollectorClient {
         }
         catch (error) {
             const errorCategory = classifyUploadError(error);
-            await enqueueBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
+            if (isPermanentQueueError(errorCategory)) {
+                await deadLetterBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
+            }
+            else {
+                await enqueueBatch(batch, queuePath, { errorCategory, lastError: safeErrorMessage(error) });
+            }
             return {
                 accepted: 0,
                 duplicates: 0,
-                failed: 0,
+                failed: isPermanentQueueError(errorCategory) ? events.length : 0,
                 task_count: new Set(events.map((event) => event.task_id)).size,
-                queued: true,
+                queued: !isPermanentQueueError(errorCategory),
                 events: events.map((event) => ({
                     event_id: event.event_id,
                     event_type: event.event_type,
@@ -278,20 +301,57 @@ export class CollectorClient {
     }
     async flushQueue(tool = this.tool) {
         const queuePath = this.queuePathFor(tool);
-        const queued = await readQueuedBatches(queuePath);
-        const remaining = [];
-        let sent = 0;
-        for (const batch of queued) {
-            try {
-                const result = await this.postBatch(batch);
-                sent += result.accepted + result.duplicates;
-            }
-            catch {
-                remaining.push(batch);
+        const existing = queueFlushes.get(queuePath);
+        if (existing)
+            return existing;
+        const running = this.flushQueueOnce(queuePath);
+        queueFlushes.set(queuePath, running);
+        try {
+            return await running;
+        }
+        finally {
+            if (queueFlushes.get(queuePath) === running) {
+                queueFlushes.delete(queuePath);
             }
         }
-        await replaceQueue(remaining, queuePath);
-        return { sent, remaining: remaining.length };
+    }
+    async flushQueueOnce(queuePath) {
+        const queued = await readQueuedEntries(queuePath);
+        const retryableRemaining = [];
+        let sent = 0;
+        const toFlush = queued.slice(0, QUEUE_FLUSH_MAX_BATCHES);
+        const deferred = queued.slice(QUEUE_FLUSH_MAX_BATCHES);
+        for (const entry of toFlush) {
+            if (isPermanentQueueError(entry.error_category)) {
+                await deadLetterBatch(entry.batch, queuePath, {
+                    errorCategory: entry.error_category,
+                    lastError: entry.last_error,
+                    retryCount: entry.retry_count,
+                    firstSeenAt: entry.first_seen_at
+                });
+                continue;
+            }
+            try {
+                const result = await this.postBatch(entry.batch);
+                sent += result.accepted + result.duplicates;
+            }
+            catch (error) {
+                const errorCategory = classifyUploadError(error);
+                if (isPermanentQueueError(errorCategory)) {
+                    await deadLetterBatch(entry.batch, queuePath, {
+                        errorCategory,
+                        lastError: safeErrorMessage(error),
+                        retryCount: (entry.retry_count || 0) + 1,
+                        firstSeenAt: entry.first_seen_at
+                    });
+                }
+                else {
+                    retryableRemaining.push(retryEntry(entry, error, errorCategory));
+                }
+            }
+        }
+        await replaceQueueEntries([...retryableRemaining, ...deferred], queuePath);
+        return { sent, remaining: retryableRemaining.length + deferred.length };
     }
     queuePathFor(tool) {
         return this.queuePath || tinyAiQueuePathForTool(tool || this.tool);

@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, extname } from "node:path";
 
 import { tinyAiQueuePathForTool } from "./config.js";
 import type { EventBatch, ToolName } from "./event-schema.js";
@@ -19,7 +19,7 @@ export type QueuedBatchEntry = {
   schema_version: "tinyai.queue.v2";
   queue_id: string;
   tool?: ToolName;
-  status: "queued";
+  status: "queued" | "dead_letter";
   retry_count: number;
   first_seen_at: string;
   last_attempt_at: string;
@@ -34,6 +34,8 @@ export type EnqueueBatchOptions = {
   lastError?: string;
   retryCount?: number;
   nextRetryAt?: string;
+  status?: QueuedBatchEntry["status"];
+  firstSeenAt?: string;
 };
 
 function toolFromBatch(batch?: EventBatch): ToolName | undefined {
@@ -55,9 +57,9 @@ function queueEntryFromBatch(batch: EventBatch, options: EnqueueBatchOptions = {
     schema_version: "tinyai.queue.v2",
     queue_id: queueIdFor(batch),
     tool: toolFromBatch(batch),
-    status: "queued",
+    status: options.status || "queued",
     retry_count: options.retryCount || 0,
-    first_seen_at: now,
+    first_seen_at: options.firstSeenAt || now,
     last_attempt_at: now,
     next_retry_at: options.nextRetryAt,
     last_error: options.lastError,
@@ -66,14 +68,30 @@ function queueEntryFromBatch(batch: EventBatch, options: EnqueueBatchOptions = {
   };
 }
 
-function batchFromQueueLine(value: unknown): EventBatch | undefined {
+function entryFromQueueLine(value: unknown): QueuedBatchEntry | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   if (record.schema_version === "tinyai.queue.v2") {
     const batch = record.batch;
-    return batch && typeof batch === "object" ? batch as EventBatch : undefined;
+    if (!batch || typeof batch !== "object") return undefined;
+    return {
+      schema_version: "tinyai.queue.v2",
+      queue_id: typeof record.queue_id === "string" ? record.queue_id : queueIdFor(batch as EventBatch),
+      tool: typeof record.tool === "string" ? record.tool as ToolName : toolFromBatch(batch as EventBatch),
+      status: record.status === "dead_letter" ? "dead_letter" : "queued",
+      retry_count: typeof record.retry_count === "number" ? record.retry_count : 0,
+      first_seen_at: typeof record.first_seen_at === "string" ? record.first_seen_at : new Date().toISOString(),
+      last_attempt_at: typeof record.last_attempt_at === "string" ? record.last_attempt_at : new Date().toISOString(),
+      next_retry_at: typeof record.next_retry_at === "string" ? record.next_retry_at : undefined,
+      last_error: typeof record.last_error === "string" ? record.last_error : undefined,
+      error_category: typeof record.error_category === "string" ? record.error_category as QueueErrorCategory : "retryable",
+      batch: batch as EventBatch
+    };
   }
-  return record.events && Array.isArray(record.events) ? record as unknown as EventBatch : undefined;
+  if (record.events && Array.isArray(record.events)) {
+    return queueEntryFromBatch(record as unknown as EventBatch);
+  }
+  return undefined;
 }
 
 export async function enqueueBatch(
@@ -90,15 +108,33 @@ export async function enqueueBatch(
   }
 }
 
-export async function readQueuedBatches(queuePath = defaultQueuePath()): Promise<EventBatch[]> {
+export function deadLetterQueuePath(queuePath = defaultQueuePath()): string {
+  const ext = extname(queuePath);
+  return ext ? `${queuePath.slice(0, -ext.length)}.dead-letter${ext}` : `${queuePath}.dead-letter`;
+}
+
+export async function deadLetterBatch(
+  batch: EventBatch,
+  queuePath = defaultQueuePath(toolFromBatch(batch)),
+  options: EnqueueBatchOptions = {}
+): Promise<void> {
+  await mkdir(dirname(queuePath), { recursive: true });
+  await writeFile(
+    deadLetterQueuePath(queuePath),
+    `${JSON.stringify(queueEntryFromBatch(batch, { ...options, status: "dead_letter" }))}\n`,
+    { flag: "a" }
+  );
+}
+
+export async function readQueuedEntries(queuePath = defaultQueuePath()): Promise<QueuedBatchEntry[]> {
   try {
     const raw = await readFile(queuePath, "utf8");
-    const batches: EventBatch[] = [];
+    const entries: QueuedBatchEntry[] = [];
     const corrupt: string[] = [];
     for (const line of raw.split("\n").filter(Boolean)) {
       try {
-        const batch = batchFromQueueLine(JSON.parse(line));
-        if (batch) batches.push(batch);
+        const entry = entryFromQueueLine(JSON.parse(line));
+        if (entry) entries.push(entry);
       } catch {
         corrupt.push(line);
       }
@@ -106,20 +142,28 @@ export async function readQueuedBatches(queuePath = defaultQueuePath()): Promise
     if (corrupt.length > 0) {
       await writeFile(`${queuePath}.corrupt`, `${corrupt.join("\n")}\n`, { flag: "a" });
     }
-    return batches.slice(-MAX_QUEUE_BATCHES);
+    return entries.slice(-MAX_QUEUE_BATCHES);
   } catch (error: any) {
     if (error?.code === "ENOENT") return [];
     throw error;
   }
 }
 
-export async function replaceQueue(batches: EventBatch[], queuePath = defaultQueuePath()): Promise<void> {
+export async function readQueuedBatches(queuePath = defaultQueuePath()): Promise<EventBatch[]> {
+  return (await readQueuedEntries(queuePath)).map((entry) => entry.batch);
+}
+
+export async function replaceQueueEntries(entries: QueuedBatchEntry[], queuePath = defaultQueuePath()): Promise<void> {
   await mkdir(dirname(queuePath), { recursive: true });
-  if (!batches.length) {
+  if (!entries.length) {
     await rm(queuePath, { force: true });
     return;
   }
   const temp = `${queuePath}.tmp`;
-  await writeFile(temp, batches.map((batch) => JSON.stringify(queueEntryFromBatch(batch))).join("\n") + "\n");
+  await writeFile(temp, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   await rename(temp, queuePath);
+}
+
+export async function replaceQueue(batches: EventBatch[], queuePath = defaultQueuePath()): Promise<void> {
+  await replaceQueueEntries(batches.map((batch) => queueEntryFromBatch(batch)), queuePath);
 }

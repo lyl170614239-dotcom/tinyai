@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { CollectorClient, uploadResultAllowsCursorCommit } from "../plugin-runtime/dist/client.js";
-import { readQueuedBatches } from "../plugin-runtime/dist/queue.js";
+import { deadLetterQueuePath, enqueueBatch, readQueuedBatches } from "../plugin-runtime/dist/queue.js";
 
-function event(payload) {
+function event(payload, eventId = "event-large-text") {
   return {
-    event_id: "event-large-text",
-    task_id: "task-large-text",
+    event_id: eventId,
+    task_id: `task-${eventId}`,
     tool: "copilot",
     event_type: "turn_snapshot",
     occurred_at: "2026-07-01T00:00:00.000Z",
@@ -76,23 +76,134 @@ test("queues failed uploads with error category metadata", async () => {
     pluginVersion: "test"
   });
   client.postBatch = async () => {
-    throw new Error("collector upload failed: 413 request entity too large");
+    throw new Error("The operation was aborted due to timeout");
   };
 
   try {
     const result = await client.upload("copilot", [event({ messages: [] })]);
     assert.equal(result.queued, true);
-    assert.equal(result.events[0].reason, "payload_too_large");
+    assert.equal(result.events[0].reason, "retryable");
 
     const raw = await readFile(queuePath, "utf8");
     const line = JSON.parse(raw.trim());
     assert.equal(line.schema_version, "tinyai.queue.v2");
-    assert.equal(line.error_category, "payload_too_large");
+    assert.equal(line.error_category, "retryable");
     assert.equal(line.retry_count, 0);
 
     const queued = await readQueuedBatches(queuePath);
     assert.equal(queued.length, 1);
     assert.equal(queued[0].events[0].event_id, "event-large-text");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("dead-letters permanent upload failures instead of retrying forever", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-dead-letter-test-"));
+  const queuePath = join(dir, "queue-copilot.jsonl");
+  const client = new CollectorClient({
+    tool: "copilot",
+    baseUrl: "http://localhost:18080",
+    queuePath,
+    pluginName: "test-plugin",
+    pluginVersion: "test"
+  });
+  client.postBatch = async () => {
+    throw new Error("collector upload failed: 422 {\"detail\":[{\"type\":\"literal_error\",\"loc\":[\"body\",\"events\",0,\"event_type\"],\"msg\":\"Input should be an allowed event type\",\"input\":\"bash_pre_tool_use\"}]}");
+  };
+
+  try {
+    const result = await client.upload("copilot", [event({ messages: [] }, "event-schema-error")]);
+    assert.equal(result.queued, false);
+    assert.equal(result.failed, 1);
+    assert.equal(result.events[0].reason, "schema_error");
+
+    const queued = await readQueuedBatches(queuePath);
+    assert.equal(queued.length, 0);
+    const deadLetter = JSON.parse((await readFile(deadLetterQueuePath(queuePath), "utf8")).trim());
+    assert.equal(deadLetter.status, "dead_letter");
+    assert.equal(deadLetter.error_category, "schema_error");
+    assert.equal(deadLetter.batch.events[0].event_id, "event-schema-error");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("flushQueue processes at most one batch window and leaves the rest queued", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-flush-limit-test-"));
+  const queuePath = join(dir, "queue-copilot.jsonl");
+  const client = new CollectorClient({
+    tool: "copilot",
+    baseUrl: "http://localhost:18080",
+    queuePath,
+    pluginName: "test-plugin",
+    pluginVersion: "test"
+  });
+  client.postBatch = async (batch) => ({
+    accepted: batch.events.length,
+    duplicates: 0,
+    failed: 0,
+    events: batch.events.map((item) => ({ event_id: item.event_id, event_type: item.event_type, status: "accepted" }))
+  });
+
+  try {
+    for (let index = 0; index < 101; index += 1) {
+      const batch = client.makeBatch("copilot", [event({ messages: [] }, `event-flush-${index}`)]);
+      await enqueueBatch(batch, queuePath);
+    }
+    const result = await client.flushQueue("copilot");
+    const remaining = await readQueuedBatches(queuePath);
+
+    assert.equal(result.sent, 100);
+    assert.equal(result.remaining, 1);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].events[0].event_id, "event-flush-100");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("flushQueue shares one in-flight flush for the same queue path", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-flush-lock-test-"));
+  const queuePath = join(dir, "queue-copilot.jsonl");
+  const client = new CollectorClient({
+    tool: "copilot",
+    baseUrl: "http://localhost:18080",
+    queuePath,
+    pluginName: "test-plugin",
+    pluginVersion: "test"
+  });
+  let postCalls = 0;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  client.postBatch = async (batch) => {
+    postCalls += 1;
+    await gate;
+    return {
+      accepted: batch.events.length,
+      duplicates: 0,
+      failed: 0,
+      events: batch.events.map((item) => ({ event_id: item.event_id, event_type: item.event_type, status: "accepted" }))
+    };
+  };
+
+  try {
+    await enqueueBatch(client.makeBatch("copilot", [event({ messages: [] }, "event-lock")]), queuePath);
+    const first = client.flushQueue("copilot");
+    const second = client.flushQueue("copilot");
+    for (let attempt = 0; attempt < 20 && postCalls === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(postCalls, 1);
+    release();
+    const results = await Promise.all([first, second]);
+
+    assert.equal(results[0].sent, 1);
+    assert.equal(results[1].sent, 1);
+    assert.equal(postCalls, 1);
+    assert.equal((await readQueuedBatches(queuePath)).length, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

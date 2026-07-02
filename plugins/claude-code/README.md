@@ -25,18 +25,25 @@ scripts/install.mjs               One-command local installer
 ### From Claude Code With A Git URL
 
 This repository exposes a Claude marketplace manifest at the repository root.
-A teammate can ask Claude Code to install the plugin from the Git URL:
+A teammate can ask Claude Code to install the plugin from the Git URL and their
+name:
 
 ```text
-请从 https://github.com/lyl170614239-dotcom/tinyai.git 安装 observability@tinyai 插件。
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Claude Code 插件，我的姓名是张三。安装时请清理本地旧版本 TinyAI 配置和插件缓存，不要写入邮箱。
 ```
 
-Claude Code should run:
+Claude Code should use a temporary branch checkout, then install from that local
+marketplace:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+rm -rf /tmp/tinyai-observability-plugins
+git clone --depth 1 --branch codex/plugin-marketplace https://github.com/lyl170614239-dotcom/tinyai.git /tmp/tinyai-observability-plugins
+claude plugin validate /tmp/tinyai-observability-plugins/.claude-plugin/marketplace.json
+claude plugin validate /tmp/tinyai-observability-plugins/plugins/claude-code/.claude-plugin/plugin.json
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
 If the teammate already has an old `tinyai` marketplace source, remove and add
@@ -44,9 +51,10 @@ it again before installing:
 
 ```bash
 claude plugin marketplace remove tinyai
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
+claude plugin marketplace list
 ```
 
 This Git URL flow depends on the root `.claude-plugin/marketplace.json`, which
@@ -86,7 +94,6 @@ cat > ~/.tinyai-observability/tinyai-observability.env <<'EOF'
 TINYAI_OBS_COLLECTOR_URL=http://localhost:18080
 TINYAI_OBS_COLLECTOR_URLS=http://localhost:18080
 TINYAI_OBS_USER_NAME=your-name
-TINYAI_OBS_USER_EMAIL=your-email@example.com
 TINYAI_OBS_CAPTURE_CONVERSATION_TEXT=true
 EOF
 ```
@@ -104,7 +111,7 @@ claude plugin marketplace list
 When Claude Code starts the MCP server, it should use the installed cache path:
 
 ```text
-~/.claude/plugins/cache/tinyai/observability/0.1.15/runtime/dist/mcp-server.js
+~/.claude/plugins/cache/tinyai/observability/<installed-version>/runtime/dist/mcp-server.js
 ```
 
 Check for stale development processes:

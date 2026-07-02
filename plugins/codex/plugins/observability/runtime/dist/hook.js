@@ -8,11 +8,12 @@ import { captureClaudeTurnSnapshotsWithRetry, commitClaudeTurnCursor, startOffse
 import { captureLatestClaudeTurnSnapshots } from "./claude-turn.js";
 import { claudeWorkspaceDiffPathCandidates, hasClaudeExternalWriteSignal } from "./claude-workspace-fallback.js";
 import { CollectorClient, uploadResultAllowsCursorCommit } from "./client.js";
-import { loadTinyAiEnvFile } from "./config.js";
+import { loadTinyAiEnvFile, tinyAiAutoInstallGitHooksEnabled } from "./config.js";
 import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
 import { captureLatestConversation, commitConversationCursor } from "./conversation.js";
-import { makeEvent, stableEventId } from "./event-schema.js";
-import { commitSnapshot, currentDiffDetails, diffSummary, pushSnapshot, recordAiLineSnapshot } from "./git.js";
+import { makeEvent, resolveUserIdentityForTool, stableEventId } from "./event-schema.js";
+import { commitSnapshot, currentDiffDetails, diffSummary, installGitHooks, recordAiLineSnapshot } from "./git.js";
+import { resolvePluginVersion } from "./plugin-version.js";
 async function readStdin() {
     return new Promise((resolve) => {
         let raw = "";
@@ -24,11 +25,16 @@ async function readStdin() {
 const workspacePath = process.env.TINYAI_OBS_WORKSPACE || cwd();
 loadTinyAiEnvFile(workspacePath);
 const tool = (process.env.TINYAI_OBS_TOOL || "claude");
+const pluginVersion = resolvePluginVersion();
+const hookInstallerTool = process.env.TINYAI_OBS_HOOK_INSTALLER_TOOL;
 const rawEventType = process.env.TINYAI_OBS_EVENT_TYPE || process.argv[2] || "plugin_heartbeat";
+if (rawEventType === "push_snapshot") {
+    process.exit(0);
+}
 const eventType = rawEventType;
 const requireAiMarker = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_REQUIRE_AI_MARKER || "").toLowerCase());
 const skipUnmarkedCommits = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_SKIP_UNMARKED_COMMITS || "").toLowerCase());
-const enableClaudeWorkspaceDiffFallback = ["1", "true", "yes", "on"].includes(String(process.env.TINYAI_OBS_ENABLE_CLAUDE_WORKSPACE_DIFF_FALLBACK || "").toLowerCase());
+const enableClaudeWorkspaceDiffFallback = !["0", "false", "no", "off"].includes(String(process.env.TINYAI_OBS_ENABLE_CLAUDE_WORKSPACE_DIFF_FALLBACK || "true").toLowerCase());
 const outputTokens = process.env.TINYAI_OBS_OUTPUT_TOKENS
     ? parseInt(process.env.TINYAI_OBS_OUTPUT_TOKENS, 10) || undefined
     : undefined;
@@ -52,7 +58,7 @@ const hookSessionFile = hookPayload.transcript_path ||
     hookPayload.session_file ||
     hookPayload.sessionFile;
 const payload = raw ? { hook_payload_present: true, hook_payload_bytes: Buffer.byteLength(raw) } : {};
-const events = eventType === "commit_snapshot" || eventType === "push_snapshot" || rawEventType === "bash_pre_tool_use" || rawEventType === "bash_post_tool_use"
+const events = eventType === "commit_snapshot" || rawEventType === "bash_pre_tool_use" || rawEventType === "bash_post_tool_use"
     ? []
     : [makeEvent({ tool, eventType, taskId: hookTaskId, sessionId: hookSessionId, workspacePath, payload, sourceConfidence: "derived" })];
 const afterSuccessfulUpload = [];
@@ -68,6 +74,26 @@ function hookToolInput() {
 function hookToolCallId() {
     const value = hookPayload.tool_use_id || hookPayload.toolUseID || hookPayload.tool_call_id || hookPayload.toolCallId;
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function gitBoundaryUserIdentity() {
+    return resolveUserIdentityForTool(hookInstallerTool || tool);
+}
+async function autoInstallGitHooksForClaude() {
+    if (tool !== "claude")
+        return;
+    if (eventType === "commit_snapshot")
+        return;
+    if (!tinyAiAutoInstallGitHooksEnabled(workspacePath))
+        return;
+    try {
+        await installGitHooks(workspacePath, {
+            tool: "claude",
+            pluginVersion
+        });
+    }
+    catch {
+        // Claude hooks can run outside Git workspaces.
+    }
 }
 function hookCommand() {
     const input = hookToolInput();
@@ -104,8 +130,9 @@ async function claudeTurnContextForToolCall(toolCallId) {
         return {};
     }
 }
+await autoInstallGitHooksForClaude();
 if (eventType === "task_start" && tool === "claude" && typeof hookSessionFile === "string") {
-    await startOffsetForClaudeTurnFile(hookSessionFile, hookSessionId);
+    await startOffsetForClaudeTurnFile(hookSessionFile, hookSessionId, { initializeAtEof: false });
 }
 if (rawEventType === "bash_pre_tool_use" && tool === "claude" && /bash|shell|terminal/.test(hookToolName())) {
     const command = hookCommand();
@@ -226,24 +253,10 @@ if (eventType === "commit_snapshot") {
             eventType: "commit_snapshot",
             taskId: process.env.TINYAI_OBS_TASK_ID || (snapshot.commit_sha ? `commit-${snapshot.commit_sha.slice(0, 16)}` : undefined),
             workspacePath,
-            payload: { ...snapshot },
+            payload: { ...snapshot, hook_tool: tool, hook_installer_tool: hookInstallerTool },
+            userIdentity: gitBoundaryUserIdentity(),
             sourceConfidence: "derived",
             eventId: snapshot.commit_sha ? stableEventId(`${tool}:commit_snapshot:${workspacePath}:${snapshot.commit_sha}`) : undefined
-        }));
-    }
-}
-if (eventType === "push_snapshot") {
-    const snapshot = await pushSnapshot(workspacePath, { requireAiMarker });
-    const rangeKey = snapshot.head_sha ? `${snapshot.upstream_ref || ""}:${snapshot.base_sha || ""}:${snapshot.head_sha}` : "";
-    if (snapshot.ai_assisted || !skipUnmarkedCommits) {
-        events.push(makeEvent({
-            tool,
-            eventType: "push_snapshot",
-            taskId: process.env.TINYAI_OBS_TASK_ID || (snapshot.head_sha ? `push-${snapshot.head_sha.slice(0, 16)}` : undefined),
-            workspacePath,
-            payload: { ...snapshot },
-            sourceConfidence: "derived",
-            eventId: rangeKey ? stableEventId(`${tool}:push_snapshot:${workspacePath}:${rangeKey}`) : undefined
         }));
     }
 }

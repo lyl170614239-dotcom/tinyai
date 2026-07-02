@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_serializer
 
 
-ToolName = Literal["codex", "claude", "copilot"]
+ToolName = Literal["codex", "claude", "copilot", "git"]
 SourceConfidence = Literal["direct", "derived", "inferred"]
 EventType = Literal[
     "task_start",
@@ -57,7 +57,6 @@ class EventIn(BaseModel):
     source_confidence: SourceConfidence = "direct"
     username: str = Field(default="unknown", max_length=128)
     user_id: Optional[str] = Field(default=None, max_length=128)
-    user_email: Optional[str] = Field(default=None, max_length=256)
     user_display_name: Optional[str] = Field(default=None, max_length=128)
     team: Optional[str] = Field(default=None, max_length=128)
     machine_id: Optional[str] = Field(default=None, max_length=128)
@@ -71,7 +70,6 @@ class BatchIn(BaseModel):
     plugin_version: str = Field(default="0.1.0", max_length=64)
     username: str = Field(default="unknown", max_length=128)
     user_id: Optional[str] = Field(default=None, max_length=128)
-    user_email: Optional[str] = Field(default=None, max_length=256)
     user_display_name: Optional[str] = Field(default=None, max_length=128)
     team: Optional[str] = Field(default=None, max_length=128)
     machine_id: Optional[str] = Field(default=None, max_length=128)
@@ -102,10 +100,10 @@ class PluginClientOut(BaseModel):
     plugin_version: Optional[str]
     username: Optional[str]
     user_id: Optional[str]
-    user_email: Optional[str]
     user_display_name: Optional[str]
     team: Optional[str]
     machine_id: Optional[str]
+    model: Optional[str]
     last_seen_at: datetime
 
     @field_serializer("last_seen_at")

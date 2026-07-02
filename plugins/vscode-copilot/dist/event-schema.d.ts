@@ -1,6 +1,6 @@
-export type ToolName = "codex" | "claude" | "copilot";
+export type ToolName = "codex" | "claude" | "copilot" | "git";
 export type SourceConfidence = "direct" | "derived" | "inferred";
-export type EventType = "task_start" | "task_end" | "spec_read" | "catalog_hit" | "fallback_search" | "official_misread" | "code_change" | "ai_line_snapshot" | "commit_snapshot" | "push_snapshot" | "user_correction" | "regenerate" | "interruption" | "adoption_snapshot" | "turn_snapshot" | "conversation_snapshot" | "agent_process_snapshot" | "agent_activity" | "file_read" | "plugin_heartbeat";
+export type EventType = "task_start" | "task_end" | "spec_read" | "catalog_hit" | "fallback_search" | "official_misread" | "code_change" | "ai_line_snapshot" | "commit_snapshot" | "user_correction" | "regenerate" | "interruption" | "adoption_snapshot" | "turn_snapshot" | "conversation_snapshot" | "agent_process_snapshot" | "agent_activity" | "file_read" | "plugin_heartbeat";
 export interface ObservabilityEvent {
     event_id: string;
     task_id: string;
@@ -13,7 +13,6 @@ export interface ObservabilityEvent {
     source_confidence: SourceConfidence;
     username: string;
     user_id?: string;
-    user_email?: string;
     user_display_name?: string;
     team?: string;
     machine_id?: string;
@@ -26,7 +25,6 @@ export interface EventBatch {
     plugin_version: string;
     username: string;
     user_id?: string;
-    user_email?: string;
     user_display_name?: string;
     team?: string;
     machine_id?: string;
@@ -51,7 +49,6 @@ export interface BatchUploadResult {
 export interface UserIdentity {
     username: string;
     user_id?: string;
-    user_email?: string;
     user_display_name?: string;
     team?: string;
     machine_id?: string;
@@ -63,6 +60,7 @@ export declare function taskIdFromEnv(): string;
 export declare function clientId(tool: ToolName, overrides?: Partial<UserIdentity>): string;
 export declare function resolveUsername(): string;
 export declare function resolveUserIdentity(overrides?: Partial<UserIdentity>): UserIdentity;
+export declare function resolveUserIdentityForTool(toolName: string | undefined, overrides?: Partial<UserIdentity>): UserIdentity;
 export declare function resolveModel(): string | undefined;
 export declare function makeEvent(input: {
     tool: ToolName;

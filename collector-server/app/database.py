@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
+from .identity import normalize_plugin_user_id
 
 
 class Base(DeclarativeBase):
@@ -69,6 +70,9 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_identity_columns()
+    _normalize_plugin_client_user_ids()
+    _normalize_event_identity_columns()
+    _deduplicate_plugin_clients()
     _ensure_product_table_storage()
     _ensure_turn_snapshot_storage()
     _ensure_line_attribution_storage()
@@ -80,10 +84,9 @@ def init_db() -> None:
 
 def _ensure_identity_columns() -> None:
     inspector = inspect(engine)
-    columns = {
+    session_columns = {
         "username": "VARCHAR(128) NULL",
         "user_id": "VARCHAR(128) NULL",
-        "user_email": "VARCHAR(256) NULL",
         "user_display_name": "VARCHAR(128) NULL",
         "team": "VARCHAR(128) NULL",
         "machine_id": "VARCHAR(128) NULL",
@@ -97,10 +100,123 @@ def _ensure_identity_columns() -> None:
     }
     with engine.begin() as connection:
         for table, existing in table_columns.items():
-            for name, ddl in columns.items():
+            if "user_email" in existing:
+                connection.execute(text(f"ALTER TABLE `{table}` DROP COLUMN `user_email`"))
+                existing.remove("user_email")
+            for name, ddl in session_columns.items():
                 if name in existing:
                     continue
-                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                connection.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{name}` {ddl}"))
+
+
+def _normalize_plugin_client_user_ids() -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table("plugin_clients"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("plugin_clients")}
+    if not {"user_id", "username", "user_display_name"}.issubset(columns):
+        return
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT `client_id`, `username`, `user_id`, `user_display_name`
+                FROM `plugin_clients`
+                """
+            )
+        ).mappings().all()
+        for row in rows:
+            normalized = normalize_plugin_user_id(
+                username=row.get("username"),
+                user_id=row.get("user_id"),
+                user_display_name=row.get("user_display_name"),
+            )
+            if normalized and normalized != row.get("user_id"):
+                connection.execute(
+                    text("UPDATE `plugin_clients` SET `user_id` = :user_id WHERE `client_id` = :client_id"),
+                    {"user_id": normalized, "client_id": row["client_id"]},
+                )
+
+
+def _normalize_event_identity_columns() -> None:
+    inspector = inspect(engine)
+    targets = (
+        ("raw_ingest_events", "event_id"),
+        ("plugin_heartbeats", "event_id"),
+        ("ai_sessions", "session_id"),
+    )
+    for table_name, pk_column in targets:
+        if not inspector.has_table(table_name):
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        required = {pk_column, "username", "user_id", "user_display_name"}
+        if not required.issubset(columns):
+            continue
+        where = "`user_id` IS NULL OR `user_id` LIKE '%@%'"
+        if engine.dialect.name in {"mysql", "mariadb"}:
+            where = f"{where} OR `user_id` REGEXP '[^A-Za-z0-9._-]'"
+        if "user_email" in columns:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE `{table_name}` DROP COLUMN `user_email`"))
+            columns.remove("user_email")
+        with engine.begin() as connection:
+            rows = connection.execute(
+                text(
+                    f"""
+                    SELECT `{pk_column}` AS `pk`, `username`, `user_id`,
+                           NULL AS `user_email`,
+                           `user_display_name`
+                    FROM `{table_name}`
+                    WHERE {where}
+                    """
+                )
+            ).mappings().all()
+            for row in rows:
+                normalized = normalize_plugin_user_id(
+                    username=row.get("username"),
+                    user_id=row.get("user_id"),
+                    user_display_name=row.get("user_display_name"),
+                )
+                assignments = ["`user_id` = :user_id"]
+                params = {"user_id": normalized, "pk": row["pk"]}
+                connection.execute(
+                    text(f"UPDATE `{table_name}` SET {', '.join(assignments)} WHERE `{pk_column}` = :pk"),
+                    params,
+                )
+
+
+def _deduplicate_plugin_clients() -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table("plugin_clients"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("plugin_clients")}
+    required = {"id", "tool", "plugin_name", "user_id", "machine_id", "host_hash", "client_id", "last_seen_at"}
+    if not required.issubset(columns):
+        return
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT `id`, `tool`, `plugin_name`, `user_id`, `machine_id`, `host_hash`, `client_id`, `last_seen_at`
+                FROM `plugin_clients`
+                WHERE `user_id` IS NOT NULL AND TRIM(`user_id`) != ''
+                ORDER BY `last_seen_at` DESC, `id` DESC
+                """
+            )
+        ).mappings().all()
+        seen: set[tuple[str | None, str | None, str | None, str]] = set()
+        duplicate_ids: list[int] = []
+        for row in rows:
+            device_key = row.get("machine_id") or row.get("host_hash") or row.get("client_id")
+            key = (row.get("tool"), row.get("plugin_name"), row.get("user_id"), str(device_key))
+            if key in seen:
+                duplicate_ids.append(int(row["id"]))
+                continue
+            seen.add(key)
+        if duplicate_ids:
+            params = {f"id_{index}": value for index, value in enumerate(duplicate_ids)}
+            placeholders = ", ".join(f":id_{index}" for index in range(len(duplicate_ids)))
+            connection.execute(text(f"DELETE FROM `plugin_clients` WHERE `id` IN ({placeholders})"), params)
 
 
 def _ensure_product_table_storage() -> None:
@@ -132,6 +248,12 @@ def _ensure_product_table_storage() -> None:
                 "raw_event_id": "VARCHAR(64) NULL",
                 "raw_path": "VARCHAR(512) NULL",
                 "source_key": "VARCHAR(256) NULL",
+                "content_storage": "VARCHAR(24) NOT NULL DEFAULT 'inline'",
+                "blob_ref": "VARCHAR(512) NULL",
+                "blob_encoding": "VARCHAR(64) NULL",
+                "blob_original_bytes": "BIGINT NULL",
+                "blob_compressed_bytes": "BIGINT NULL",
+                "blob_sha256": "VARCHAR(128) NULL",
             }
             for column_name, ddl in message_source_columns.items():
                 if column_name not in columns:
@@ -361,7 +483,6 @@ def _ensure_multi_client_storage() -> None:
     identity_columns = {
         "username": "VARCHAR(128) NULL",
         "user_id": "VARCHAR(128) NULL",
-        "user_email": "VARCHAR(256) NULL",
         "user_display_name": "VARCHAR(128) NULL",
         "team": "VARCHAR(128) NULL",
         "machine_id": "VARCHAR(128) NULL",
@@ -370,6 +491,9 @@ def _ensure_multi_client_storage() -> None:
     with engine.begin() as connection:
         if inspector.has_table("raw_ingest_events"):
             columns = {column["name"] for column in inspector.get_columns("raw_ingest_events")}
+            if "user_email" in columns:
+                connection.execute(text("ALTER TABLE `raw_ingest_events` DROP COLUMN `user_email`"))
+                columns.remove("user_email")
             for column_name, ddl in identity_columns.items():
                 if column_name not in columns:
                     connection.execute(text(f"ALTER TABLE `raw_ingest_events` ADD COLUMN `{column_name}` {ddl}"))
@@ -417,6 +541,9 @@ def _ensure_multi_client_storage() -> None:
                 )
 
         if inspector.has_table("plugin_heartbeats"):
+            columns = {column["name"] for column in inspector.get_columns("plugin_heartbeats")}
+            if "user_email" in columns:
+                connection.execute(text("ALTER TABLE `plugin_heartbeats` DROP COLUMN `user_email`"))
             indexes = {index["name"] for index in inspector.get_indexes("plugin_heartbeats")}
             heartbeat_indexes = {
                 "ix_plugin_heartbeats_recent": "(`occurred_at`)",
@@ -429,8 +556,14 @@ def _ensure_multi_client_storage() -> None:
 
         if inspector.has_table("plugin_clients"):
             indexes = {index["name"] for index in inspector.get_indexes("plugin_clients")}
-            if "ix_plugin_clients_last_seen" not in indexes:
-                connection.execute(text("ALTER TABLE `plugin_clients` ADD INDEX `ix_plugin_clients_last_seen` (`last_seen_at`)"))
+            plugin_indexes = {
+                "ix_plugin_clients_last_seen": "(`last_seen_at`)",
+                "ix_plugin_clients_identity_host": "(`tool`, `plugin_name`, `user_id`, `host_hash`)",
+                "ix_plugin_clients_identity_machine": "(`tool`, `plugin_name`, `user_id`, `machine_id`)",
+            }
+            for index_name, columns_sql in plugin_indexes.items():
+                if index_name not in indexes:
+                    connection.execute(text(f"ALTER TABLE `plugin_clients` ADD INDEX `{index_name}` {columns_sql}"))
 
 
 def _ensure_ingest_job_storage() -> None:

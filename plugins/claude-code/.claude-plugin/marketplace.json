@@ -5,19 +5,25 @@
   },
   "metadata": {
     "description": "TinyAI observability plugin marketplace for Claude Code.",
-    "version": "0.1.15"
+    "version": "0.1.20"
   },
   "plugins": [
     {
       "name": "observability",
       "source": "./",
       "description": "Capture Claude Code task telemetry, conversation snapshots, specs reads, feedback, and code adoption signals.",
-      "version": "0.1.15",
+      "version": "0.1.20",
       "author": {
         "name": "TinyAI"
       },
       "category": "observability",
-      "tags": ["telemetry", "specs", "mcp", "hooks", "claude-code"]
+      "tags": [
+        "telemetry",
+        "specs",
+        "mcp",
+        "hooks",
+        "claude-code"
+      ]
     }
   ]
 }

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cwd } from "node:process";
 
-export type ToolName = "codex" | "claude" | "copilot";
+export type ToolName = "codex" | "claude" | "copilot" | "git";
 export type SourceConfidence = "direct" | "derived" | "inferred";
 export type EventType =
   | "task_start"
@@ -13,7 +13,6 @@ export type EventType =
   | "code_change"
   | "ai_line_snapshot"
   | "commit_snapshot"
-  | "push_snapshot"
   | "user_correction"
   | "regenerate"
   | "interruption"
@@ -37,7 +36,6 @@ export interface ObservabilityEvent {
   source_confidence: SourceConfidence;
   username: string;
   user_id?: string;
-  user_email?: string;
   user_display_name?: string;
   team?: string;
   machine_id?: string;
@@ -51,7 +49,6 @@ export interface EventBatch {
   plugin_version: string;
   username: string;
   user_id?: string;
-  user_email?: string;
   user_display_name?: string;
   team?: string;
   machine_id?: string;
@@ -79,7 +76,6 @@ export interface BatchUploadResult {
 export interface UserIdentity {
   username: string;
   user_id?: string;
-  user_email?: string;
   user_display_name?: string;
   team?: string;
   machine_id?: string;
@@ -102,7 +98,7 @@ export function taskIdFromEnv(): string {
 
 export function clientId(tool: ToolName, overrides: Partial<UserIdentity> = {}): string {
   const identity = resolveUserIdentity(overrides);
-  const seed = `${tool}:${identity.user_id || identity.user_email || identity.user_display_name || identity.username}:${identity.machine_id || identity.host_hash || "local"}`;
+  const seed = `${tool}:${identity.user_id || identity.user_display_name || identity.username}:${identity.machine_id || identity.host_hash || "local"}`;
   return createHash("sha256").update(seed).digest("hex").slice(0, 32);
 }
 
@@ -115,13 +111,26 @@ function clean(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function usableUserId(value: string | undefined): string | undefined {
+  const cleaned = clean(value);
+  if (!cleaned) return undefined;
+  const lowered = cleaned.toLowerCase();
+  if (lowered === "unknown" || lowered === "user" || lowered === "null" || lowered === "none") return undefined;
+  if (cleaned.includes("@")) return undefined;
+  return cleaned;
+}
+
 function normalizeToolEnvName(tool: string | undefined): string | undefined {
   const normalized = tool?.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return normalized || undefined;
 }
 
 function toolEnvValue(suffix: string): string | undefined {
-  const tool = normalizeToolEnvName(process.env.TINYAI_OBS_TOOL);
+  return toolEnvValueForTool(process.env.TINYAI_OBS_TOOL, suffix);
+}
+
+function toolEnvValueForTool(toolName: string | undefined, suffix: string): string | undefined {
+  const tool = normalizeToolEnvName(toolName);
   if (tool) {
     const value = clean(process.env[`TINYAI_OBS_${tool}_${suffix}`]);
     if (value) return value;
@@ -130,23 +139,25 @@ function toolEnvValue(suffix: string): string | undefined {
 }
 
 export function resolveUserIdentity(overrides: Partial<UserIdentity> = {}): UserIdentity {
-  const userEmail = clean(overrides.user_email) || toolEnvValue("USER_EMAIL");
+  return resolveUserIdentityForTool(process.env.TINYAI_OBS_TOOL, overrides);
+}
+
+export function resolveUserIdentityForTool(toolName: string | undefined, overrides: Partial<UserIdentity> = {}): UserIdentity {
   const userDisplayName =
     clean(overrides.user_display_name) ||
-    toolEnvValue("USER_DISPLAY_NAME") ||
-    toolEnvValue("USER_NAME");
-  const username = clean(overrides.username) || toolEnvValue("USERNAME") || userDisplayName || resolveUsername();
+    toolEnvValueForTool(toolName, "USER_DISPLAY_NAME") ||
+    toolEnvValueForTool(toolName, "USER_NAME");
+  const username = clean(overrides.username) || toolEnvValueForTool(toolName, "USERNAME") || userDisplayName || resolveUsername();
+  const explicitUserId = clean(overrides.user_id) || toolEnvValueForTool(toolName, "USER_ID");
   const userId =
-    clean(overrides.user_id) ||
-    toolEnvValue("USER_ID") ||
-    userEmail ||
-    userDisplayName ||
+    usableUserId(explicitUserId) ||
+    usableUserId(username) ||
+    usableUserId(userDisplayName) ||
     username;
   const hostname = clean(process.env.HOSTNAME) || "local";
   return {
     username,
     user_id: userId,
-    user_email: userEmail,
     user_display_name: userDisplayName,
     team: clean(overrides.team) || clean(process.env.TINYAI_OBS_TEAM),
     machine_id: clean(overrides.machine_id) || clean(process.env.TINYAI_OBS_MACHINE_ID),

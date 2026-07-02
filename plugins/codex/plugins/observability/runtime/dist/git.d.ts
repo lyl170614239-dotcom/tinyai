@@ -24,12 +24,14 @@ export interface DiffDetailFile {
     old_path?: string;
     sensitive: boolean;
     binary?: boolean;
+    line_number_basis: "absolute";
     lines_added: number;
     lines_deleted: number;
     hunks: DiffDetailHunk[];
 }
 export interface GitDiffDetails extends GitDiffSummary {
     snapshot_kind: "workspace_diff";
+    line_number_basis: "absolute";
     diff_hash: string;
     diff_raw?: string;
     include_text: boolean;
@@ -71,6 +73,10 @@ export interface AiLineEvidence {
 }
 export interface GitCommitSnapshot extends GitDiffSummary {
     commit_sha?: string;
+    git_author_name?: string;
+    git_author_email?: string;
+    git_committer_name?: string;
+    git_committer_email?: string;
     branch?: string;
     snapshot_kind: "commit";
     diff_hash?: string;
@@ -94,21 +100,6 @@ export interface GitCommitSnapshot extends GitDiffSummary {
     ai_modified_ratio?: number;
     ai_overall_change_ratio?: number;
     line_attribution: LineAttribution;
-}
-export interface GitPushSnapshot extends GitDiffSummary {
-    branch?: string;
-    upstream_ref?: string;
-    base_sha?: string;
-    head_sha?: string;
-    commit_count: number;
-    snapshot_kind: "push";
-    ai_assisted: boolean;
-    ai_lines_added: number;
-    ai_lines_deleted: number;
-    ai_attribution_method: string;
-    ai_attribution_evidence: string;
-    ai_marker_task_id?: string;
-    ai_marker_age_seconds?: number;
 }
 export interface AiActivityMarker {
     tool: string;
@@ -153,7 +144,6 @@ export declare function currentDiffDetails(workspacePath: string, options?: {
 export declare function currentBranch(workspacePath: string): Promise<string | undefined>;
 export declare function currentHead(workspacePath: string): Promise<string | undefined>;
 export declare function commitSnapshot(workspacePath: string, ref?: string, options?: AttributionOptions): Promise<GitCommitSnapshot>;
-export declare function pushSnapshot(workspacePath: string, options?: AttributionOptions): Promise<GitPushSnapshot>;
 export declare function installGitHooks(workspacePath: string, options: {
     tool: string;
     collectorUrl?: string;

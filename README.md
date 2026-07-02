@@ -119,7 +119,6 @@ The script writes these VS Code settings:
   "tinyaiObservability.token": "",
   "tinyaiObservability.userName": "张三",
   "tinyaiObservability.userId": "zhangsan",
-  "tinyaiObservability.userEmail": "zhangsan@example.com",
   "tinyaiObservability.team": "hotel",
   "tinyaiObservability.captureConversationText": true,
   "tinyaiObservability.captureVisibleReasoningText": false,
@@ -155,7 +154,6 @@ npm run configure:vscode -- --flavor insiders --user-name "张三"
 # Optional stable identity fields for larger teams.
 npm run configure:vscode -- \
   --user-name "张三" \
-  --user-email "zhangsan@example.com" \
   --team "hotel"
 ```
 
@@ -433,6 +431,12 @@ written by plugin MCP/spec/chat/task tools and expires after 6 hours by default
 (`TINYAI_OBS_AI_MARKER_TTL_SECONDS`). Plain human commits without a marker are
 not counted as AI. Events use stable IDs based on commit SHA or push range, so
 repeated hook runs do not double count the same code.
+
+Commit and push snapshots are Git boundary events: new hooks default to
+`tool=git`, while `payload.hook_installer_tool` records whether Copilot,
+Claude, or Codex installed/refreshed the hook. The user identity still comes
+from the installing plugin configuration; Git author/committer names are kept
+as raw payload evidence only.
 
 For same-commit AI-vs-human line attribution, the plugins record line evidence
 before commit:

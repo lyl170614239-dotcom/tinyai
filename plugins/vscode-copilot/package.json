@@ -2,7 +2,7 @@
   "name": "tinyai-observability-copilot",
   "displayName": "TinyAI Observability",
   "description": "Native VS Code extension for Copilot/Claude TinyAI coding telemetry.",
-  "version": "0.1.47",
+  "version": "0.1.51",
   "publisher": "tinyai",
   "private": true,
   "type": "module",
@@ -66,12 +66,7 @@
         "tinyaiObservability.userId": {
           "type": "string",
           "default": "",
-          "description": "Optional stable teammate ID. If empty, TinyAI uses userEmail, then userName."
-        },
-        "tinyaiObservability.userEmail": {
-          "type": "string",
-          "default": "",
-          "description": "Optional teammate email used for identity disambiguation."
+          "description": "Optional stable teammate ID. If empty, TinyAI uses userName."
         },
         "tinyaiObservability.team": {
           "type": "string",
@@ -111,13 +106,19 @@
         "tinyaiObservability.autoInstallGitHooks": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically install or refresh non-destructive TinyAI Git hooks for AI line fingerprints, commit snapshots, and push snapshots when a Git workspace opens."
+          "description": "Automatically install or refresh non-destructive TinyAI Git hooks for commit snapshots when a Git workspace opens."
         },
         "tinyaiObservability.autoCaptureRecentMinutes": {
           "type": "number",
           "default": 30,
           "minimum": 1,
           "description": "Only auto-capture Copilot/Claude transcript files modified within this many minutes. This keeps startup scans focused on recent work instead of backfilling old chats."
+        },
+        "tinyaiObservability.queueFlushIntervalSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "description": "How often the extension retries TinyAI local disk queues, independent of transcript auto-capture."
         }
       }
     },

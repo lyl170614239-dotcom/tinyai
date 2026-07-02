@@ -18,10 +18,17 @@ plugins/codex/
 ## Teammate Install
 
 Teammates normally do not need to clone this repository. They can install from
-the Git marketplace entry exposed at the repository root:
+the Git marketplace entry exposed at the repository root. A teammate can ask
+Codex:
+
+```text
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Codex 插件，我的姓名是张三。安装时请清理本地旧版本 TinyAI 配置和插件缓存，不要写入邮箱。
+```
+
+Codex should run:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref codex/plugin-marketplace --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -34,16 +41,15 @@ completed turn.
 
 ## Local Development Install
 
-From the repository root:
-
-```bash
-node scripts/install_codex_observability_plugin.mjs
-codex plugin list
-```
-
-The local installer copies `plugins/codex/plugins/observability` into
+The lightweight marketplace branch does not require a local development
+installer. Use the Git marketplace install command above for teammate setup. In
+the main development tree, the local installer copies
+`plugins/codex/plugins/observability` into
 `~/.codex/plugins/cache/tinyai/observability/<version>` and writes the explicit
 TinyAI MCP server block in `~/.codex/config.toml`.
+It also removes older `tinyai/observability` cache versions by default so Codex
+cannot accidentally start a stale MCP server. Use `--keep-old-cache` only when
+you explicitly need to inspect an older install.
 
 You can also add this directory as a local marketplace while iterating:
 

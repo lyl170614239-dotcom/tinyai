@@ -9,6 +9,7 @@ import {
   buildClaudeBashDeltaPayload,
   captureClaudeBashSnapshot,
   claudeWorkspaceDiffPathCandidates,
+  currentDiffDetails,
   hasClaudeExternalWriteSignal
 } from "../plugin-runtime/dist/index.js";
 
@@ -64,6 +65,75 @@ test("Claude workspace fallback does not run for read-only terminal commands", (
 
   assert.equal(hasClaudeExternalWriteSignal(snapshot), false);
   assert.deepEqual(claudeWorkspaceDiffPathCandidates(snapshot), []);
+});
+
+test("Claude workspace fallback runs for direct edit tool patches", () => {
+  const snapshot = {
+    code_changes: [
+      {
+        file_path: "openspec/specs/domain-knowledge.md"
+      }
+    ],
+    tool_calls: [
+      {
+        tool_name: "replace_string_in_file",
+        arguments_raw: {
+          file_path: "openspec/specs/domain-knowledge.md",
+          old_string: "old",
+          new_string: "new"
+        },
+        result_raw: "The file has been updated."
+      }
+    ],
+    process_steps: [
+      {
+        step_type: "tool_use",
+        text: "replace_string_in_file openspec/specs/domain-knowledge.md"
+      }
+    ]
+  };
+
+  assert.equal(hasClaudeExternalWriteSignal(snapshot), true);
+  assert.deepEqual(claudeWorkspaceDiffPathCandidates(snapshot), ["openspec/specs/domain-knowledge.md"]);
+});
+
+test("Claude workspace fallback candidates produce absolute workspace diff evidence", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "tinyai-claude-edit-diff-"));
+  await mkdir(join(workspace, "openspec", "specs"), { recursive: true });
+  await writeFile(join(workspace, "openspec", "specs", "domain-knowledge.md"), "old\n", "utf8");
+  execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: workspace });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: workspace });
+  execFileSync("git", ["add", "."], { cwd: workspace });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: workspace, stdio: "ignore" });
+  await writeFile(join(workspace, "openspec", "specs", "domain-knowledge.md"), "old\nnew from claude\n", "utf8");
+
+  const snapshot = {
+    code_changes: [
+      {
+        file_path: "openspec/specs/domain-knowledge.md"
+      }
+    ],
+    tool_calls: [
+      {
+        tool_name: "replace_string_in_file",
+        arguments_raw: {
+          file_path: "openspec/specs/domain-knowledge.md",
+          old_string: "old\n",
+          new_string: "old\nnew from claude\n"
+        }
+      }
+    ]
+  };
+  const paths = claudeWorkspaceDiffPathCandidates(snapshot);
+  const diff = await currentDiffDetails(workspace, { includeText: true, includeUntracked: true, paths });
+
+  assert.equal(hasClaudeExternalWriteSignal(snapshot), true);
+  assert.equal(diff.line_number_basis, "absolute");
+  assert.equal(diff.files_changed, 1);
+  assert.equal(diff.files[0].file_path, "openspec/specs/domain-knowledge.md");
+  assert.equal(diff.files[0].hunks[0].new_start, 1);
+  assert.equal(diff.files[0].hunks[0].lines.some((line) => line.line_type === "added" && line.new_line === 2), true);
 });
 
 test("Claude workspace fallback ignores read-only command output that mentions modified files", () => {

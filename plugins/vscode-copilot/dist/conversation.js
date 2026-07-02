@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 async function walkJsonl(root, maxFiles = 500) {
     const files = [];
     async function visit(dir) {
@@ -385,6 +385,7 @@ function parseApplyPatchEdits(patchText) {
                 file_path: cleaned,
                 lines_added: 0,
                 lines_deleted: 0,
+                line_number_basis: fileMatch[1] === "Add" ? "absolute" : "relative",
                 hunks: []
             };
             oldLine = 1;
@@ -398,6 +399,10 @@ function parseApplyPatchEdits(patchText) {
             if (hunkMatch?.[1]) {
                 oldLine = Number(hunkMatch[1]);
                 newLine = Number(hunkMatch[2] || 1);
+                current.line_number_basis = "absolute";
+            }
+            else if (current.line_number_basis !== "absolute") {
+                current.line_number_basis = "relative";
             }
             current.hunks.push({
                 old_start: oldLine,
@@ -433,6 +438,10 @@ function parseApplyPatchEdits(patchText) {
             oldLine += 1;
         }
         else if (rawLine.startsWith(" ")) {
+            const text = rawLine.slice(1);
+            hunk.lines.push({ line_type: "context", old_line: oldLine, new_line: newLine, text, text_hash: hashText(`${current.file_path}\0${text}`) });
+            hunk.old_lines += 1;
+            hunk.new_lines += 1;
             oldLine += 1;
             newLine += 1;
         }
@@ -489,8 +498,110 @@ function extractCodeEdits(toolName, input, _includeText) {
             file_path: cleaned,
             lines_added: added.length,
             lines_deleted: removed.length,
+            line_number_basis: "relative",
             hunks: [{ old_start: prefix + 1, old_lines: removed.length, new_start: prefix + 1, new_lines: added.length, lines: hunkLines }]
         }];
+}
+function splitFileContentLines(content) {
+    const lines = content.split(/\r?\n/);
+    if (lines.at(-1) === "")
+        lines.pop();
+    return lines;
+}
+function findLineSequence(haystack, needle, startIndex) {
+    if (needle.length === 0 || needle.length > haystack.length)
+        return -1;
+    for (let index = Math.max(0, startIndex); index <= haystack.length - needle.length; index += 1) {
+        let matches = true;
+        for (let offset = 0; offset < needle.length; offset += 1) {
+            if (haystack[index + offset] !== needle[offset]) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches)
+            return index;
+    }
+    return -1;
+}
+function codeEditFilePath(cwd, filePath) {
+    if (!cwd || !filePath || filePath.includes("\0"))
+        return undefined;
+    const cleaned = filePath.replace(/^file:\/\//, "");
+    return isAbsolute(cleaned) ? cleaned : join(cwd, cleaned);
+}
+async function resolveRelativeCodeEditLines(edits, cwd) {
+    if (!cwd || edits.length === 0)
+        return edits;
+    const cache = new Map();
+    async function fileLines(filePath) {
+        const absolutePath = codeEditFilePath(cwd, filePath);
+        if (!absolutePath)
+            return undefined;
+        if (cache.has(absolutePath))
+            return cache.get(absolutePath);
+        try {
+            const lines = splitFileContentLines(await readFile(absolutePath, "utf8"));
+            cache.set(absolutePath, lines);
+            return lines;
+        }
+        catch {
+            cache.set(absolutePath, undefined);
+            return undefined;
+        }
+    }
+    const resolved = [];
+    for (const edit of edits) {
+        if (edit.line_number_basis === "absolute") {
+            resolved.push(edit);
+            continue;
+        }
+        const lines = await fileLines(edit.file_path);
+        if (!lines) {
+            resolved.push(edit);
+            continue;
+        }
+        let searchFrom = 0;
+        let allHunksResolved = edit.hunks.length > 0;
+        const hunks = [];
+        for (const hunk of edit.hunks) {
+            const postPatchTexts = hunk.lines.filter((line) => line.line_type !== "removed").map((line) => line.text);
+            const matchIndex = findLineSequence(lines, postPatchTexts, searchFrom);
+            if (matchIndex < 0) {
+                allHunksResolved = false;
+                break;
+            }
+            const startLine = matchIndex + 1;
+            const onlyAdded = hunk.lines.every((line) => line.line_type === "added");
+            let nextOldLine = onlyAdded ? Math.max(0, startLine - 1) : startLine;
+            let nextNewLine = startLine;
+            const resolvedHunkLines = hunk.lines.map((line) => {
+                if (line.line_type === "removed") {
+                    const resolvedLine = { ...line, old_line: nextOldLine };
+                    nextOldLine += 1;
+                    return resolvedLine;
+                }
+                if (line.line_type === "added") {
+                    const resolvedLine = { ...line, new_line: nextNewLine };
+                    nextNewLine += 1;
+                    return resolvedLine;
+                }
+                const resolvedLine = { ...line, old_line: nextOldLine, new_line: nextNewLine };
+                nextOldLine += 1;
+                nextNewLine += 1;
+                return resolvedLine;
+            });
+            hunks.push({
+                ...hunk,
+                old_start: onlyAdded ? Math.max(0, startLine - 1) : startLine,
+                new_start: startLine,
+                lines: resolvedHunkLines
+            });
+            searchFrom = matchIndex + Math.max(postPatchTexts.length, 1);
+        }
+        resolved.push(allHunksResolved ? { ...edit, line_number_basis: "absolute", hunks } : edit);
+    }
+    return resolved;
 }
 function dedupeProcessSteps(steps) {
     const seen = new Set();
@@ -573,6 +684,19 @@ function codexLatestTurnComplete(messages, turnEvents) {
         return false;
     return turnEvents.some((event) => event.kind === "task_complete" && typeof event.sequence === "number" && event.sequence >= lastUserSequence);
 }
+function codexLatestTurnAborted(messages, turnEvents) {
+    let lastUserSequence;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message?.role === "user") {
+            lastUserSequence = message.sequence;
+            break;
+        }
+    }
+    if (lastUserSequence === undefined)
+        return false;
+    return turnEvents.some((event) => event.kind === "turn_aborted" && typeof event.sequence === "number" && event.sequence >= lastUserSequence);
+}
 export function latestCodexTurnSnapshot(snapshot) {
     const messages = snapshot.messages || [];
     let lastUserIndex = -1;
@@ -583,7 +707,7 @@ export function latestCodexTurnSnapshot(snapshot) {
         }
     }
     if (lastUserIndex < 0)
-        return { ...snapshot, latest_turn_complete: false };
+        return { ...snapshot, latest_turn_complete: false, latest_turn_aborted: false, latest_turn_terminal: false };
     const localTurnIndex = messages.slice(0, lastUserIndex + 1).filter((message) => message.role === "user").length;
     const turnIndex = (snapshot.turn_index_offset || 0) + localTurnIndex;
     const userMessage = messages[lastUserIndex];
@@ -662,6 +786,7 @@ export function latestCodexTurnSnapshot(snapshot) {
     }), { prompt_tokens: 0, output_tokens: 0, completion_tokens: 0, elapsed_ms: 0, copilot_credits: 0 });
     const latestTurnComplete = latestTurnEvents.some((event) => event.kind === "task_complete");
     const latestTurnAborted = latestTurnEvents.some((event) => event.kind === "turn_aborted");
+    const latestTurnTerminal = latestTurnComplete || latestTurnAborted;
     const userMessageCount = latestMessages.filter((message) => message.role === "user").length;
     const assistantMessageCount = latestMessages.filter((message) => message.role === "assistant").length;
     const toolCallCount = latestSteps.filter((step) => step.kind === "tool_call").length;
@@ -689,8 +814,133 @@ export function latestCodexTurnSnapshot(snapshot) {
         usage_totals: latestRequestUsage.length > 0 ? latestUsageTotals : undefined,
         model: latestRequestUsage.find((usage) => usage.model)?.model || snapshot.model,
         resolved_model: latestRequestUsage.find((usage) => usage.model)?.model || snapshot.resolved_model,
-        latest_turn_complete: latestTurnComplete
+        latest_turn_complete: latestTurnComplete,
+        latest_turn_aborted: latestTurnAborted,
+        latest_turn_terminal: latestTurnTerminal
     };
+}
+export function codexTerminalTurnSnapshots(snapshot) {
+    const messages = snapshot.messages || [];
+    const userEntries = messages
+        .map((message, index) => ({ message, index }))
+        .filter((entry) => entry.message.role === "user");
+    if (userEntries.length === 0)
+        return [];
+    return userEntries.flatMap((entry, localIndex) => {
+        const userMessage = entry.message;
+        const startSequence = typeof userMessage.sequence === "number" ? userMessage.sequence : undefined;
+        const nextUserEntry = userEntries[localIndex + 1];
+        const nextUserSequence = typeof nextUserEntry?.message.sequence === "number" ? nextUserEntry.message.sequence : undefined;
+        const inTurn = (item) => {
+            if (startSequence === undefined)
+                return true;
+            if (typeof item.sequence !== "number" || item.sequence < startSequence)
+                return false;
+            return nextUserSequence === undefined || item.sequence < nextUserSequence;
+        };
+        const turnEvents = (snapshot.turn_events || []).filter(inTurn);
+        const completeEvent = turnEvents.find((event) => event.kind === "task_complete");
+        const abortedEvent = turnEvents.find((event) => event.kind === "turn_aborted");
+        if (!completeEvent && !abortedEvent)
+            return [];
+        const turnIndex = (snapshot.turn_index_offset || 0) + localIndex + 1;
+        const { requestId, responseId } = codexTurnIds(snapshot.session_id, turnIndex, userMessage);
+        const endIndex = nextUserEntry?.index ?? messages.length;
+        const rawTurnMessages = messages.slice(entry.index, endIndex);
+        let finalAssistantOffset = -1;
+        for (let index = rawTurnMessages.length - 1; index >= 0; index -= 1) {
+            if (rawTurnMessages[index]?.role === "assistant") {
+                finalAssistantOffset = index;
+                break;
+            }
+        }
+        const turnMessages = rawTurnMessages
+            .filter((message, index) => message.role === "user" || index === finalAssistantOffset)
+            .map((message) => ({
+            ...message,
+            turn_index: turnIndex,
+            request_id: requestId,
+            response_id: responseId
+        }));
+        const assistantProgressSteps = rawTurnMessages
+            .filter((message, index) => message.role === "assistant" && index !== finalAssistantOffset)
+            .map((message) => ({
+            kind: "assistant_progress",
+            text_len: message.text_len,
+            text_hash: message.text_hash,
+            text: message.text,
+            label: "assistant_progress",
+            status: "complete",
+            occurred_at: message.occurred_at,
+            sequence: message.sequence,
+            turn_index: turnIndex,
+            request_id: requestId,
+            response_id: responseId,
+            step_id: hashText(`assistant_progress:${message.message_id || message.text_hash}`)
+        }));
+        const turnSteps = (snapshot.process_steps || [])
+            .filter(inTurn)
+            .map((step) => ({
+            ...step,
+            turn_index: turnIndex,
+            request_id: step.request_id || requestId,
+            response_id: step.response_id || responseId
+        }));
+        const processSteps = [...assistantProgressSteps, ...turnSteps];
+        const fileReads = (snapshot.file_reads || []).filter(inTurn);
+        const codeEdits = (snapshot.code_edits || [])
+            .filter(inTurn)
+            .map((edit) => ({
+            ...edit,
+            turn_index: turnIndex,
+            request_id: edit.request_id || requestId,
+            response_id: edit.response_id || responseId
+        }));
+        const requestUsage = (snapshot.request_usage || [])
+            .filter((usage) => usage.turn_index === turnIndex)
+            .map((usage) => ({
+            ...usage,
+            turn_index: turnIndex,
+            request_id: usage.request_id || requestId,
+            response_id: usage.response_id || responseId
+        }));
+        const usageTotals = requestUsage.reduce((totals, usage) => ({
+            prompt_tokens: totals.prompt_tokens + (usage.prompt_tokens || 0),
+            output_tokens: totals.output_tokens + (usage.output_tokens || 0),
+            completion_tokens: totals.completion_tokens + (usage.completion_tokens || 0),
+            elapsed_ms: totals.elapsed_ms + (usage.elapsed_ms || 0),
+            copilot_credits: totals.copilot_credits + (usage.copilot_credits || 0)
+        }), { prompt_tokens: 0, output_tokens: 0, completion_tokens: 0, elapsed_ms: 0, copilot_credits: 0 });
+        const userMessageCount = turnMessages.filter((message) => message.role === "user").length;
+        const assistantMessageCount = turnMessages.filter((message) => message.role === "assistant").length;
+        return [{
+                ...snapshot,
+                message_count: turnMessages.length,
+                user_message_count: userMessageCount,
+                assistant_message_count: assistantMessageCount,
+                user_followup_count: Math.max(userMessageCount - 1, 0),
+                turn_started_count: 1,
+                turn_completed_count: completeEvent ? 1 : 0,
+                turn_aborted_count: abortedEvent ? 1 : 0,
+                task_repeat_attempts: 0,
+                tool_call_count: processSteps.filter((step) => step.kind === "tool_call").length,
+                tool_result_count: processSteps.filter((step) => step.kind === "tool_result").length,
+                patch_apply_count: 0,
+                patch_success_count: 0,
+                messages: turnMessages,
+                process_steps: processSteps.length > 0 ? processSteps : undefined,
+                file_reads: fileReads.length > 0 ? fileReads : undefined,
+                code_edits: codeEdits.length > 0 ? codeEdits : undefined,
+                turn_events: turnEvents.length > 0 ? turnEvents : undefined,
+                request_usage: requestUsage.length > 0 ? requestUsage : undefined,
+                usage_totals: requestUsage.length > 0 ? usageTotals : undefined,
+                model: requestUsage.find((usage) => usage.model)?.model || snapshot.model,
+                resolved_model: requestUsage.find((usage) => usage.model)?.model || snapshot.resolved_model,
+                latest_turn_complete: Boolean(completeEvent),
+                latest_turn_aborted: Boolean(abortedEvent),
+                latest_turn_terminal: true
+            }];
+    });
 }
 export async function captureLatestCodexConversation(options = {}) {
     const file = cleanExistingFile(options.sessionFile) || await latestSessionFile();
@@ -931,6 +1181,9 @@ export async function captureLatestCodexConversation(options = {}) {
         modelEvents,
         turnIndexOffset
     });
+    const resolvedCodeEdits = await resolveRelativeCodeEditLines(codeEdits, cwd);
+    const latestTurnComplete = codexLatestTurnComplete(messages, turnEvents);
+    const latestTurnAborted = codexLatestTurnAborted(messages, turnEvents);
     const snapshot = {
         session_id: sessionId,
         session_file: file.replace(homedir(), "~"),
@@ -954,11 +1207,13 @@ export async function captureLatestCodexConversation(options = {}) {
         messages,
         process_steps: dedupedSteps.length > 0 ? dedupedSteps : undefined,
         file_reads: fileReads.size > 0 ? [...fileReads.values()] : undefined,
-        code_edits: codeEdits.length > 0 ? codeEdits : undefined,
+        code_edits: resolvedCodeEdits.length > 0 ? resolvedCodeEdits : undefined,
         turn_events: turnEvents.length > 0 ? turnEvents : undefined,
         request_usage: requestUsage.length > 0 ? requestUsage : undefined,
         usage_totals: requestUsage.length > 0 ? usageTotals : undefined,
-        latest_turn_complete: codexLatestTurnComplete(messages, turnEvents),
+        latest_turn_complete: latestTurnComplete,
+        latest_turn_aborted: latestTurnAborted,
+        latest_turn_terminal: latestTurnComplete || latestTurnAborted,
         turn_index_offset: turnIndexOffset,
         capture_cursor: cursor
     };

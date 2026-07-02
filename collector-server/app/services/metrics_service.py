@@ -169,7 +169,6 @@ def _spec_change_locations(change: AiCodeChange) -> list[dict[str, Any]]:
 
 
 AI_TURN_CODE_SNAPSHOT_KINDS = {
-    "copilot_turn_tool_patch",
     "copilot_turn_editor_delta",
     "copilot_turn_workspace_diff",
     "claude_turn_tool_patch",
@@ -336,9 +335,11 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
         sessions = db.execute(select(AiSession).where(_identity_filter(AiSession, username))).scalars().all()
     else:
         sessions = db.execute(select(AiSession)).scalars().all()
+    ai_sessions = [session for session in sessions if session.tool != "git"]
 
     session_ids = {session.session_id for session in sessions}
-    session_units = set(session_ids)
+    ai_session_ids = {session.session_id for session in ai_sessions}
+    session_units = set(ai_session_ids)
     if username:
         event_query = select(RawIngestEvent).where(
             or_(
@@ -405,7 +406,7 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
         _unit_id(event.session_id, event.task_id)
         for event in events
         if event.event_type == "task_end"
-    } | {session.session_id for session in sessions if session.status == "completed"}
+    } | {session.session_id for session in ai_sessions if session.status == "completed"}
     successful_tasks = {
         _unit_id(event.session_id, event.task_id)
         for event in events
@@ -699,7 +700,6 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
     personal_adoption, personal_retained, personal_generated = _ai_code_adoption_rate(code_changes, personal_tasks)
     overall_adoption, overall_retained, overall_generated = _ai_code_adoption_rate(code_changes)
     commit_ai = _ai_code_totals_from_changes(code_changes, "commit_snapshot")
-    push_ai = _ai_code_totals_from_changes(code_changes, "push_snapshot")
     pr_ai = _pr_ai_code_totals(pr_attributions)
     effective_ai_turn_changes = [change for change in code_changes if _is_copilot_turn_code_change(change)]
     ai_generated_added_lines = _ai_generated_added_lines(code_changes)
@@ -1050,25 +1050,6 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
                     unit="count",
                 ),
                 _metric(
-                    23,
-                    "推送/PR 级 AI 代码占比",
-                    _ratio(push_ai["ai_added"], push_ai["total_added"]),
-                    numerator=push_ai["ai_added"],
-                    denominator=push_ai["total_added"],
-                    confidence="derived",
-                    method="ai_code_changes push_snapshot ai_lines_added / lines_added",
-                ),
-                _metric(
-                    24,
-                    "推送/PR 级 AI 新增代码行数",
-                    push_ai["ai_added"],
-                    numerator=push_ai["ai_added"],
-                    denominator=push_ai["event_count"],
-                    confidence="derived",
-                    method="sum(ai_lines_added) from ai_code_changes where change_type=push_snapshot",
-                    unit="count",
-                ),
-                _metric(
                     25,
                     "GitHub PR 级 AI 新增代码行数",
                     pr_ai["ai_added"],
@@ -1099,7 +1080,6 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
             ],
             "details": {
                 "commit_snapshot": commit_ai,
-                "push_snapshot": push_ai,
                 "github_pr_attribution": pr_ai,
                 "attribution_note": "Commit attribution is deterministic: commit_snapshot line hashes are matched against previously ingested AI turn diff evidence (copilot_turn_*/claude_turn_*/codex_turn_*), consuming duplicate line hashes by occurrence count. Modified lines are inferred from added+removed pairs inside each hunk.",
             },
@@ -1221,7 +1201,7 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
     return {
         "summary": {
             "task_count": task_count,
-            "session_count": len(sessions),
+            "session_count": len(ai_sessions),
             "turn_count": len(turns),
             "message_count": len(messages),
             "event_count": len(events),
@@ -1241,11 +1221,9 @@ def knowledge_metrics(db: Session, username: str | None = None) -> dict[str, Any
             "agent_activity_event_count": len(process_steps),
             "file_read_event_count": len([step for step in process_steps if step.step_type == "file_read"]),
             "commit_snapshot_count": commit_ai["event_count"],
-            "push_snapshot_count": push_ai["event_count"],
             "ai_committed_lines": commit_ai["ai_added"],
             "ai_generated_added_lines": ai_generated_added_lines,
             "ai_commit_current_added_lines": ai_commit_current_added_lines,
-            "ai_pushed_lines": push_ai["ai_added"],
             "pr_attribution_count": pr_ai["event_count"],
             "pr_ai_lines": pr_ai["ai_added"],
             "pr_total_lines": pr_ai["total_added"],

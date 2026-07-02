@@ -246,6 +246,7 @@ async function fileChange(workspacePath: string, filePath: string, before: Snaps
     return {
       file_path: filePath,
       binary: true,
+      line_number_basis: "absolute",
       before_hash: beforeHash,
       after_hash: afterHash,
       before_size_bytes: beforeBuffer.length,
@@ -259,6 +260,7 @@ async function fileChange(workspacePath: string, filePath: string, before: Snaps
   const parsed = parseUnifiedDiff(diffRaw, filePath);
   return {
     file_path: filePath,
+    line_number_basis: "absolute",
     before_hash: beforeHash,
     after_hash: afterHash,
     before_size_bytes: beforeBuffer.length,

@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     ingest_job_max_attempts: int = 5
     ingest_job_retry_seconds: int = 30
     ingest_job_lock_timeout_seconds: int = 300
+    plugin_heartbeat_min_interval_seconds: int = 60
+    plugin_client_heartbeat_update_min_interval_seconds: int = 60
 
     model_config = SettingsConfigDict(env_prefix="OBS_", env_file=".env", extra="ignore")
 

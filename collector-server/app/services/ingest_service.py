@@ -11,8 +11,10 @@ from typing import Any
 
 from dateutil import parser as date_parser
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.orm import Session
 
+from ..identity import clean_identity, normalize_plugin_user_id
 from ..models import (
     AiCodeChange,
     AiLineAttribution,
@@ -36,13 +38,13 @@ from ..schemas.events import BatchIn, EventIn
 from .normalization_service import PARSER_VERSION, normalize_event
 
 
-IDENTITY_FIELDS = ("username", "user_id", "user_email", "user_display_name", "team", "machine_id", "host_hash")
+IDENTITY_FIELDS = ("username", "user_id", "user_display_name", "team", "machine_id", "host_hash")
+PLUGIN_CLIENT_IDENTITY_FIELDS = ("username", "user_id", "user_display_name", "team", "machine_id", "host_hash", "model")
 BEIJING_TZ = timezone(timedelta(hours=8))
 _last_cleanup_at: datetime | None = None
 MUTABLE_CODE_SNAPSHOT_KINDS = {
     "code_change",
     "copilot_turn_editor_delta",
-    "copilot_turn_tool_patch",
     "copilot_turn_workspace_diff",
     "claude_turn_editor_delta",
     "claude_turn_tool_patch",
@@ -58,9 +60,11 @@ MUTABLE_CODE_SNAPSHOT_KINDS = {
     "task_end",
     "tool_edit",
 }
+PROPOSED_ONLY_CODE_SNAPSHOT_KINDS = {
+    "copilot_turn_tool_patch",
+}
 PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT = 5_000
 AI_TURN_CODE_SNAPSHOT_KINDS = {
-    "copilot_turn_tool_patch",
     "copilot_turn_editor_delta",
     "copilot_turn_workspace_diff",
     "claude_turn_tool_patch",
@@ -73,7 +77,6 @@ AI_TURN_CODE_SNAPSHOT_KINDS = {
     "codex_mcp_auto_capture",
 }
 AI_TURN_TOOL_PATCH_SNAPSHOT_KINDS = {
-    "copilot_turn_tool_patch",
     "claude_turn_tool_patch",
     "codex_turn_tool_patch",
 }
@@ -119,12 +122,25 @@ def _parse_time(value: Any, fallback: datetime) -> datetime:
 
 
 def _clean_identity(value: str | None) -> str | None:
-    if not value:
-        return None
-    cleaned = str(value).strip()
-    if not cleaned or cleaned.lower() in {"unknown", "null", "none"}:
-        return None
-    return cleaned
+    return clean_identity(value)
+
+
+def _plugin_client_identity(identity: dict[str, str | None], model: str | None = None) -> dict[str, str | None]:
+    username = _clean_identity(identity.get("username")) or _clean_identity(identity.get("user_display_name")) or "unknown"
+    user_id = normalize_plugin_user_id(
+        username=username,
+        user_id=identity.get("user_id"),
+        user_display_name=identity.get("user_display_name"),
+    )
+    return {
+        "username": username,
+        "user_id": user_id,
+        "user_display_name": _clean_identity(identity.get("user_display_name")),
+        "team": _clean_identity(identity.get("team")),
+        "machine_id": _clean_identity(identity.get("machine_id")),
+        "host_hash": _clean_identity(identity.get("host_hash")),
+        "model": _clean_identity(model),
+    }
 
 
 def _identity_from_batch(batch: BatchIn) -> dict[str, str | None]:
@@ -142,6 +158,17 @@ def _identity_from_event(event: EventIn) -> dict[str, str | None]:
     return identity
 
 
+def _normalized_product_identity(identity: dict[str, str | None]) -> dict[str, str | None]:
+    normalized = dict(identity)
+    normalized["username"] = _clean_identity(identity.get("username")) or _clean_identity(identity.get("user_display_name")) or "unknown"
+    normalized["user_id"] = normalize_plugin_user_id(
+        username=normalized["username"],
+        user_id=identity.get("user_id"),
+        user_display_name=identity.get("user_display_name"),
+    )
+    return normalized
+
+
 def _event_session_id(event: EventIn) -> str | None:
     if event.session_id:
         return event.session_id
@@ -157,8 +184,8 @@ def _product_session_id(event: EventIn, payload: dict[str, Any]) -> str:
     return _event_session_id(event) or event.task_id
 
 
-def _apply_identity(target: Any, identity: dict[str, str | None]) -> None:
-    for field in IDENTITY_FIELDS:
+def _apply_identity(target: Any, identity: dict[str, str | None], fields: tuple[str, ...] = IDENTITY_FIELDS) -> None:
+    for field in fields:
         value = identity.get(field)
         if not value:
             continue
@@ -169,12 +196,71 @@ def _apply_identity(target: Any, identity: dict[str, str | None]) -> None:
         setattr(target, "username", identity["user_display_name"])
 
 
+def _apply_plugin_client_identity(target: PluginClient, identity: dict[str, str | None]) -> None:
+    for field in PLUGIN_CLIENT_IDENTITY_FIELDS:
+        value = identity.get(field)
+        if not value:
+            continue
+        if field == "username" and value == "unknown" and _clean_identity(getattr(target, "username", None)):
+            continue
+        setattr(target, field, value)
+
+
+def _find_plugin_client_by_identity(db: Session, tool: str, plugin_name: str, identity: dict[str, str | None]) -> PluginClient | None:
+    user_id = identity.get("user_id")
+    if not user_id:
+        return None
+
+    base_conditions = [
+        PluginClient.tool == tool,
+        PluginClient.plugin_name == plugin_name,
+        PluginClient.user_id == user_id,
+    ]
+    machine_id = identity.get("machine_id")
+    host_hash = identity.get("host_hash")
+    if machine_id:
+        device_condition = PluginClient.machine_id == machine_id
+        if host_hash:
+            device_condition = or_(
+                device_condition,
+                (PluginClient.machine_id.is_(None) & (PluginClient.host_hash == host_hash)),
+            )
+        return db.execute(select(PluginClient).where(*base_conditions).where(device_condition)).scalars().first()
+    if host_hash:
+        return db.execute(select(PluginClient).where(*base_conditions).where(PluginClient.host_hash == host_hash)).scalars().first()
+    return None
+
+
+def _batch_is_plugin_heartbeat_only(batch: BatchIn) -> bool:
+    return bool(batch.events) and all(event.event_type == "plugin_heartbeat" for event in batch.events)
+
+
+def _plugin_client_has_metadata_change(client: PluginClient, tool: str, plugin_name: str, plugin_version: str, identity: dict[str, str | None]) -> bool:
+    if client.tool != tool or client.plugin_name != plugin_name or client.plugin_version != plugin_version:
+        return True
+    for field in PLUGIN_CLIENT_IDENTITY_FIELDS:
+        value = identity.get(field)
+        if value and _clean_identity(getattr(client, field, None)) != value:
+            return True
+    return False
+
+
+def _plugin_client_update_is_throttled(client: PluginClient, now: datetime, identity: dict[str, str | None], tool: str, plugin_name: str, plugin_version: str) -> bool:
+    settings = get_settings()
+    interval = max(0, settings.plugin_client_heartbeat_update_min_interval_seconds)
+    if interval <= 0:
+        return False
+    if _plugin_client_has_metadata_change(client, tool, plugin_name, plugin_version, identity):
+        return False
+    last_seen_at = getattr(client, "last_seen_at", None)
+    if not last_seen_at:
+        return False
+    return (now - _naive(last_seen_at)).total_seconds() < interval
+
+
 def _identity_display(row: Any) -> str | None:
     display_name = _clean_identity(getattr(row, "user_display_name", None))
-    email = _clean_identity(getattr(row, "user_email", None))
-    if display_name and email:
-        return f"{display_name} <{email}>"
-    return display_name or email or _clean_identity(getattr(row, "user_id", None)) or _clean_identity(getattr(row, "username", None))
+    return display_name or _clean_identity(getattr(row, "user_id", None)) or _clean_identity(getattr(row, "username", None))
 
 
 def _identity_filter(model: Any, identity: str):
@@ -188,29 +274,37 @@ def _identity_filter(model: Any, identity: str):
     return or_(
         model.username.in_(candidates),
         model.user_id.in_(candidates),
-        model.user_email.in_(candidates),
         model.user_display_name.in_(candidates),
     )
 
 
-def _upsert_plugin(db: Session, batch: BatchIn) -> None:
+def _upsert_plugin(db: Session, batch: BatchIn, *, throttle_heartbeat: bool = False) -> None:
     first_tool = batch.events[0].tool
-    identity = _identity_from_batch(batch)
+    model = batch.model or batch.events[0].model
+    identity = _plugin_client_identity(_identity_from_batch(batch), model)
     client = db.execute(select(PluginClient).where(PluginClient.client_id == batch.client_id)).scalar_one_or_none()
+    if not client:
+        client = _find_plugin_client_by_identity(db, first_tool, batch.plugin_name, identity)
     if client:
+        now = _local_now()
+        if throttle_heartbeat and _plugin_client_update_is_throttled(client, now, identity, first_tool, batch.plugin_name, batch.plugin_version):
+            return
+        client.client_id = batch.client_id
         client.tool = first_tool
         client.plugin_name = batch.plugin_name
         client.plugin_version = batch.plugin_version
-        client.last_seen_at = _local_now()
-        _apply_identity(client, identity)
+        client.last_seen_at = now
+        _apply_plugin_client_identity(client, identity)
     else:
         client = PluginClient(
             client_id=batch.client_id,
             tool=first_tool,
             plugin_name=batch.plugin_name,
             plugin_version=batch.plugin_version,
+            model=identity.get("model"),
+            last_seen_at=_local_now(),
         )
-        _apply_identity(client, identity)
+        _apply_plugin_client_identity(client, identity)
         db.add(client)
 
 
@@ -228,29 +322,52 @@ def _is_install_smoke_batch(batch: BatchIn) -> bool:
     return True
 
 
-def _insert_plugin_heartbeat(db: Session, batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> bool:
-    if db.get(PluginHeartbeat, event.event_id):
+def _recent_plugin_heartbeat_exists(db: Session, batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> bool:
+    if payload.get("smoke_test") is True:
         return False
-    identity = _identity_from_event(event)
-    db.add(
-        PluginHeartbeat(
-            event_id=event.event_id,
-            client_id=batch.client_id,
-            plugin_name=batch.plugin_name,
-            plugin_version=batch.plugin_version,
-            tool=event.tool,
-            username=identity["username"],
-            user_id=identity["user_id"],
-            user_email=identity["user_email"],
-            user_display_name=identity["user_display_name"],
-            team=identity["team"],
-            machine_id=identity["machine_id"],
-            host_hash=identity["host_hash"],
-            payload=payload,
-            occurred_at=_naive(event.occurred_at),
-        )
+    interval = max(0, get_settings().plugin_heartbeat_min_interval_seconds)
+    if interval <= 0:
+        return False
+    event_time = _naive(event.occurred_at)
+    cutoff = event_time - timedelta(seconds=interval)
+    return db.execute(
+        select(PluginHeartbeat.event_id)
+        .where(PluginHeartbeat.client_id == batch.client_id)
+        .where(PluginHeartbeat.tool == event.tool)
+        .where(PluginHeartbeat.plugin_name == batch.plugin_name)
+        .where(PluginHeartbeat.plugin_version == batch.plugin_version)
+        .where(PluginHeartbeat.occurred_at >= cutoff)
+        .where(PluginHeartbeat.occurred_at <= event_time)
+        .limit(1)
+    ).scalar_one_or_none() is not None
+
+
+def _insert_plugin_heartbeat(db: Session, batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> tuple[bool, str | None]:
+    if db.get(PluginHeartbeat, event.event_id):
+        return False, "heartbeat_event_id_exists"
+    if _recent_plugin_heartbeat_exists(db, batch, event, payload):
+        return False, "heartbeat_rate_limited"
+    identity = _normalized_product_identity(_identity_from_event(event))
+    values = dict(
+        event_id=event.event_id,
+        client_id=batch.client_id,
+        plugin_name=batch.plugin_name,
+        plugin_version=batch.plugin_version,
+        tool=event.tool,
+        username=identity["username"],
+        user_id=identity["user_id"],
+        user_display_name=identity["user_display_name"],
+        team=identity["team"],
+        machine_id=identity["machine_id"],
+        host_hash=identity["host_hash"],
+        payload=payload,
+        occurred_at=_naive(event.occurred_at),
     )
-    return True
+    if db.get_bind().dialect.name == "mysql":
+        result = db.execute(mysql_insert(PluginHeartbeat.__table__).prefix_with("IGNORE").values(**values))
+        return (True, None) if result.rowcount else (False, "heartbeat_event_id_exists")
+    db.add(PluginHeartbeat(**values))
+    return True, None
 
 
 def _raw_event_json(batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +378,6 @@ def _raw_event_json(batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> 
             "plugin_version": batch.plugin_version,
             "username": batch.username,
             "user_id": batch.user_id,
-            "user_email": batch.user_email,
             "user_display_name": batch.user_display_name,
             "team": batch.team,
             "machine_id": batch.machine_id,
@@ -275,32 +391,34 @@ def _raw_event_json(batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> 
     }
 
 
-def _insert_raw_ingest_event(db: Session, batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> None:
+def _insert_raw_ingest_event(db: Session, batch: BatchIn, event: EventIn, payload: dict[str, Any]) -> bool:
     if db.get(RawIngestEvent, event.event_id):
-        return
-    identity = _identity_from_event(event)
-    db.add(
-        RawIngestEvent(
-            event_id=event.event_id,
-            client_id=batch.client_id,
-            plugin_name=batch.plugin_name,
-            plugin_version=batch.plugin_version,
-            tool=event.tool,
-            event_type=event.event_type,
-            session_id=_event_session_id(event),
-            task_id=event.task_id,
-            source_confidence=event.source_confidence,
-            username=identity["username"],
-            user_id=identity["user_id"],
-            user_email=identity["user_email"],
-            user_display_name=identity["user_display_name"],
-            team=identity["team"],
-            machine_id=identity["machine_id"],
-            host_hash=identity["host_hash"],
-            raw_json=_raw_event_json(batch, event, payload),
-            occurred_at=_naive(event.occurred_at),
-        )
+        return False
+    identity = _normalized_product_identity(_identity_from_event(event))
+    values = dict(
+        event_id=event.event_id,
+        client_id=batch.client_id,
+        plugin_name=batch.plugin_name,
+        plugin_version=batch.plugin_version,
+        tool=event.tool,
+        event_type=event.event_type,
+        session_id=_event_session_id(event),
+        task_id=event.task_id,
+        source_confidence=event.source_confidence,
+        username=identity["username"],
+        user_id=identity["user_id"],
+        user_display_name=identity["user_display_name"],
+        team=identity["team"],
+        machine_id=identity["machine_id"],
+        host_hash=identity["host_hash"],
+        raw_json=_raw_event_json(batch, event, payload),
+        occurred_at=_naive(event.occurred_at),
     )
+    if db.get_bind().dialect.name == "mysql":
+        result = db.execute(mysql_insert(RawIngestEvent.__table__).prefix_with("IGNORE").values(**values))
+        return bool(result.rowcount)
+    db.add(RawIngestEvent(**values))
+    return True
 
 
 def _extract_raw_event_blobs(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -358,15 +476,17 @@ def _decode_inline_blobs(blobs: list[dict[str, Any]]) -> dict[str, Any]:
     return decoded
 
 
-def _rehydrate_blob_refs(value: Any, decoded_blobs: dict[str, Any]) -> Any:
+def _rehydrate_blob_refs(value: Any, decoded_blobs: dict[str, Any], key: str | None = None) -> Any:
     if isinstance(value, list):
         return [_rehydrate_blob_refs(item, decoded_blobs) for item in value]
     if not isinstance(value, dict):
         return value
+    if key == "text_blob_ref":
+        return value
     blob_ref = value.get("blob_ref")
     if isinstance(blob_ref, str) and blob_ref in decoded_blobs:
         return decoded_blobs[blob_ref]
-    return {key: _rehydrate_blob_refs(child, decoded_blobs) for key, child in value.items()}
+    return {child_key: _rehydrate_blob_refs(child, decoded_blobs, child_key) for child_key, child in value.items()}
 
 
 def _insert_raw_event_blobs(db: Session, event_id: str, blobs: list[dict[str, Any]]) -> None:
@@ -508,7 +628,7 @@ def _read_normalized_event(db: Session, event_id: str) -> dict[str, Any]:
 def _upsert_ai_session(db: Session, event: EventIn, payload: dict[str, Any], normalized: dict[str, Any]) -> AiSession:
     session_data = normalized.get("session") if isinstance(normalized.get("session"), dict) else {}
     session_id = str(session_data.get("session_id") or _product_session_id(event, payload))[:128]
-    identity = _identity_from_event(event)
+    identity = _normalized_product_identity(_identity_from_event(event))
     occurred = _naive(event.occurred_at)
     started = _parse_time(session_data.get("started_at"), event.occurred_at)
     last_activity = _parse_time(session_data.get("last_activity_at"), event.occurred_at)
@@ -548,7 +668,6 @@ def _upsert_ai_session(db: Session, event: EventIn, payload: dict[str, Any], nor
 
     session.username = identity["username"] or "unknown"
     session.user_id = identity["user_id"]
-    session.user_email = identity["user_email"]
     session.user_display_name = identity["user_display_name"]
     session.team = identity["team"]
     session.machine_id = identity["machine_id"]
@@ -691,7 +810,17 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
     source_key = str(message.get("source_key") or "")[:256] or None
     occurred = _parse_time(message.get("occurred_at"), event.occurred_at)
     content = str(message.get("content") or "")
-    text_hash = hashlib.sha256(content.encode("utf-8")).hexdigest() if content else str(message.get("content_hash") or "")[:128]
+    content_storage = str(message.get("content_storage") or ("blob_preview" if message.get("blob_ref") else "inline"))[:24]
+    text_hash = (
+        str(message.get("content_hash") or "")[:128]
+        if content_storage == "blob_preview"
+        else (hashlib.sha256(content.encode("utf-8")).hexdigest() if content else str(message.get("content_hash") or "")[:128])
+    )
+    blob_ref = str(message.get("blob_ref") or "")[:512] or None
+    blob_encoding = str(message.get("blob_encoding") or "")[:64] or None
+    blob_original_bytes = int(message.get("blob_original_bytes")) if message.get("blob_original_bytes") is not None else None
+    blob_compressed_bytes = int(message.get("blob_compressed_bytes")) if message.get("blob_compressed_bytes") is not None else None
+    blob_sha256 = str(message.get("blob_sha256") or "")[:128] or None
     role = str(message.get("role") or "message")[:32]
     turn_index = turn.turn_index if turn else int(message.get("turn_index") or 0)
     existing = None
@@ -744,8 +873,14 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
         row.turn_index = turn_index or row.turn_index or 0
         row.role = role
         row.content = content
+        row.content_storage = content_storage
         row.text_len = int(message.get("text_len") or len(content))
         row.text_hash = text_hash
+        row.blob_ref = blob_ref
+        row.blob_encoding = blob_encoding
+        row.blob_original_bytes = blob_original_bytes
+        row.blob_compressed_bytes = blob_compressed_bytes
+        row.blob_sha256 = blob_sha256
         row.occurred_at = occurred
         row.raw_event_id = event.event_id
         row.raw_path = str(message.get("raw_path") or "")[:512] or None
@@ -759,8 +894,14 @@ def _upsert_ai_message(db: Session, event: EventIn, session_id: str, message: di
             turn_index=turn_index,
             role=role,
             content=content,
+            content_storage=content_storage,
             text_len=int(message.get("text_len") or len(content)),
             text_hash=text_hash,
+            blob_ref=blob_ref,
+            blob_encoding=blob_encoding,
+            blob_original_bytes=blob_original_bytes,
+            blob_compressed_bytes=blob_compressed_bytes,
+            blob_sha256=blob_sha256,
             raw_event_id=event.event_id,
             raw_path=str(message.get("raw_path") or "")[:512] or None,
             source_key=source_key,
@@ -1192,6 +1333,11 @@ def _matching_ai_evidence_rows(db: Session, event: EventIn, occurred: datetime) 
 
 def _iter_code_diff_lines_from_raw_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
+    raw_code_changes = payload.get("code_changes")
+    if isinstance(raw_code_changes, list):
+        for file_change in raw_code_changes:
+            if isinstance(file_change, dict):
+                output.extend(_iter_code_diff_lines(file_change))
     raw_files = payload.get("files")
     if isinstance(raw_files, list):
         for file_change in raw_files:
@@ -1555,10 +1701,57 @@ def _has_prior_tool_patch_for_same_turn_file(db: Session, change: dict[str, Any]
         query = query.where(AiCodeChange.response_id == response_id)
     normalized = _normalize_code_path(file_path)
     for row in db.execute(query).scalars().all():
+        row_payload = _code_change_payload(row)
+        if not _change_payload_has_absolute_line_numbers(row_payload, str(row.snapshot_kind or row.change_type or "")):
+            continue
         candidate = _normalize_code_path(row.file_path)
         if candidate == normalized or candidate.endswith(f"/{normalized}") or normalized.endswith(f"/{candidate}"):
             return True
     return False
+
+
+ABSOLUTE_LINE_NUMBER_SNAPSHOT_KINDS = {
+    "copilot_turn_editor_delta",
+    "copilot_turn_workspace_diff",
+    "claude_turn_editor_delta",
+    "claude_turn_workspace_diff",
+    "claude_turn_bash_delta",
+    "codex_turn_editor_delta",
+    "codex_turn_workspace_diff",
+    "workspace_diff_current",
+    "workspace_diff",
+    "vscode_text_change",
+}
+
+
+def _line_number_basis_from_change(change: dict[str, Any]) -> str:
+    for value in (
+        change.get("line_number_basis"),
+        change.get("lineNumberBasis"),
+        (change.get("line_stats") or {}).get("line_number_basis") if isinstance(change.get("line_stats"), dict) else None,
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    if change.get("line_numbers_are_absolute") is True or change.get("lineNumbersAreAbsolute") is True:
+        return "absolute"
+    return ""
+
+
+def _change_payload_has_absolute_line_numbers(change: dict[str, Any], event_type: str = "") -> bool:
+    basis = _line_number_basis_from_change(change)
+    if basis == "absolute":
+        return True
+    if basis in {"relative", "unknown", "snippet"}:
+        return False
+    snapshot_kind = str(change.get("snapshot_kind") or change.get("change_type") or event_type or "").lower()
+    event_type_lower = str(change.get("event_type") or event_type or "").lower()
+    if event_type_lower == "commit_snapshot" or snapshot_kind in {"commit_snapshot", "commit"}:
+        return True
+    return snapshot_kind in ABSOLUTE_LINE_NUMBER_SNAPSHOT_KINDS
+
+
+def _change_has_absolute_line_numbers(event: EventIn, change: dict[str, Any]) -> bool:
+    return _change_payload_has_absolute_line_numbers(change, event.event_type)
 
 
 def _update_line_ledger_from_ai_change(db: Session, event: EventIn, occurred: datetime, change: dict[str, Any]) -> None:
@@ -1567,6 +1760,8 @@ def _update_line_ledger_from_ai_change(db: Session, event: EventIn, occurred: da
     snapshot_kind = str(change.get("snapshot_kind") or change.get("change_type") or event.event_type or "")
     snapshot_kind_lower = snapshot_kind.lower()
     if snapshot_kind_lower not in AI_TURN_CODE_SNAPSHOT_KINDS:
+        return
+    if not _change_has_absolute_line_numbers(event, change):
         return
     scope = _line_scope_from_event(event, event.payload if isinstance(event.payload, dict) else {})
     request_id = str(change.get("request_id") or "")[:256] or None
@@ -2286,7 +2481,6 @@ def _code_snapshot_priority(change: AiCodeChange) -> int:
     snapshot_kind = str(change.snapshot_kind or _code_change_payload(change).get("snapshot_kind") or change.change_type or "").lower()
     priorities = {
         "copilot_turn_workspace_diff": 30,
-        "copilot_turn_tool_patch": 20,
         "copilot_turn_editor_delta": 10,
         "claude_turn_workspace_diff": 30,
         "claude_turn_bash_delta": 25,
@@ -2309,6 +2503,10 @@ def _refresh_effective_code_changes(db: Session, session_id: str, task_id: str |
     for row in rows:
         row.is_effective = True
         row.superseded_by_event_id = None
+        snapshot_kind = str(row.snapshot_kind or _code_change_payload(row).get("snapshot_kind") or row.change_type or "").lower()
+        if snapshot_kind in PROPOSED_ONLY_CODE_SNAPSHOT_KINDS:
+            row.is_effective = False
+            continue
         if not _is_mutable_code_change(row):
             continue
         groups.setdefault(_code_effective_key(row), []).append(row)
@@ -2727,7 +2925,7 @@ def _sanitize_visible_reasoning(event: EventIn, payload: dict[str, Any]) -> tupl
 def ingest_batch(db: Session, batch: BatchIn) -> dict:
     _cleanup_ingest_history_if_due(db)
     if not _is_install_smoke_batch(batch):
-        _upsert_plugin(db, batch)
+        _upsert_plugin(db, batch, throttle_heartbeat=_batch_is_plugin_heartbeat_only(batch))
     accepted = 0
     duplicates = 0
     failed = 0
@@ -2736,17 +2934,22 @@ def ingest_batch(db: Session, batch: BatchIn) -> dict:
 
     for event in batch.events:
         task_ids.add(event.task_id)
+        if event.event_type == "push_snapshot":
+            duplicates += 1
+            event_results.append({"event_id": event.event_id, "event_type": event.event_type, "status": "duplicate", "reason": "push_snapshot_disabled"})
+            continue
         payload, raw_blobs = _extract_raw_event_blobs(dict(event.payload or {}))
         payload.setdefault("client_id", batch.client_id)
         payload.setdefault("plugin_name", batch.plugin_name)
         payload.setdefault("plugin_version", batch.plugin_version)
         if event.event_type == "plugin_heartbeat":
-            if _insert_plugin_heartbeat(db, batch, event, payload):
+            heartbeat_inserted, heartbeat_reason = _insert_plugin_heartbeat(db, batch, event, payload)
+            if heartbeat_inserted:
                 accepted += 1
                 event_results.append({"event_id": event.event_id, "event_type": event.event_type, "status": "accepted", "reason": None})
             else:
                 duplicates += 1
-                event_results.append({"event_id": event.event_id, "event_type": event.event_type, "status": "duplicate", "reason": "heartbeat_event_id_exists"})
+                event_results.append({"event_id": event.event_id, "event_type": event.event_type, "status": "duplicate", "reason": heartbeat_reason or "heartbeat_duplicate"})
             continue
 
         if db.get(RawIngestEvent, event.event_id):
@@ -2774,7 +2977,10 @@ def ingest_batch(db: Session, batch: BatchIn) -> dict:
                 duplicates += 1
                 event_results.append({"event_id": event.event_id, "event_type": event.event_type, "status": "duplicate", "reason": "semantic_duplicate"})
                 continue
-        _insert_raw_ingest_event(db, batch, event, payload)
+        if not _insert_raw_ingest_event(db, batch, event, payload):
+            duplicates += 1
+            event_results.append({"event_id": event.event_id, "event_type": event.event_type, "status": "duplicate", "reason": "event_id_exists"})
+            continue
         db.flush()
         _insert_raw_event_blobs(db, event.event_id, raw_blobs)
         payload_for_normalization = _rehydrate_blob_refs(payload, _decode_inline_blobs(raw_blobs)) if raw_blobs else payload

@@ -9,7 +9,6 @@ TEMPLATE_ENV="${REPO_ROOT}/config/tinyai-observability.env"
 
 TOOLS="claude,codex"
 USER_NAME=""
-USER_EMAIL=""
 USER_ID=""
 TEAM=""
 COLLECTOR_URL=""
@@ -24,13 +23,12 @@ usage() {
 TinyAI AI 插件一键安装脚本
 
 用法：
-  bash scripts/install_teammate_ai_plugins.sh --name 张三 --email zhangsan@example.com
+  bash scripts/install_teammate_ai_plugins.sh --name 张三
 
 常用参数：
   --tools claude,codex          安装哪些插件，默认 claude,codex
   --name 张三                   用户显示名
-  --email zhangsan@example.com  用户邮箱
-  --user-id zhangsan            用户 ID，默认使用邮箱
+  --user-id zhangsan            用户 ID，可选；默认由姓名生成
   --team hotel                  团队，可选
   --collector-url URL           主 collector 地址，可选
   --collector-urls URLS         fallback collector 地址，逗号分隔，可选
@@ -40,8 +38,8 @@ TinyAI AI 插件一键安装脚本
   --dry-run                     只预览，不写入 ~/.claude / ~/.codex
 
 示例：
-  bash scripts/install_teammate_ai_plugins.sh --name 李四 --email lisi@example.com --team hotel
-  bash scripts/install_teammate_ai_plugins.sh --tools claude --name 李四 --email lisi@example.com
+  bash scripts/install_teammate_ai_plugins.sh --name 李四 --team hotel
+  bash scripts/install_teammate_ai_plugins.sh --tools claude --name 李四
 EOF
 }
 
@@ -49,7 +47,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --tools) TOOLS="${2:-}"; shift 2 ;;
     --name) USER_NAME="${2:-}"; shift 2 ;;
-    --email) USER_EMAIL="${2:-}"; shift 2 ;;
     --user-id) USER_ID="${2:-}"; shift 2 ;;
     --team) TEAM="${2:-}"; shift 2 ;;
     --collector-url) COLLECTOR_URL="${2:-}"; shift 2 ;;
@@ -67,16 +64,12 @@ if [[ -z "${USER_NAME}" ]]; then
   read -r -p "请输入你的姓名/显示名: " USER_NAME
 fi
 
-if [[ -z "${USER_EMAIL}" ]]; then
-  read -r -p "请输入你的邮箱: " USER_EMAIL
-fi
-
 if [[ -z "${USER_ID}" ]]; then
-  USER_ID="${USER_EMAIL}"
+  USER_ID="${USER_NAME}"
 fi
 
-if [[ -z "${USER_NAME}" || -z "${USER_EMAIL}" ]]; then
-  echo "姓名和邮箱不能为空。" >&2
+if [[ -z "${USER_NAME}" ]]; then
+  echo "姓名不能为空。" >&2
   exit 2
 fi
 
@@ -92,7 +85,7 @@ fi
 
 echo "TinyAI Observability 插件安装"
 echo "项目目录：${REPO_ROOT}"
-echo "用户：${USER_NAME} <${USER_EMAIL}>"
+echo "用户：${USER_NAME}"
 echo "插件：${TOOLS}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
@@ -108,7 +101,6 @@ export TINYAI_INSTALL_ENV_FILE="${ENV_FILE}"
 export TINYAI_INSTALL_TEMPLATE_ENV="${TEMPLATE_ENV}"
 export TINYAI_INSTALL_DRY_RUN="${DRY_RUN}"
 export TINYAI_INSTALL_USER_NAME="${USER_NAME}"
-export TINYAI_INSTALL_USER_EMAIL="${USER_EMAIL}"
 export TINYAI_INSTALL_USER_ID="${USER_ID}"
 export TINYAI_INSTALL_TEAM="${TEAM}"
 export TINYAI_INSTALL_COLLECTOR_URL="${COLLECTOR_URL}"
@@ -125,7 +117,6 @@ const dryRun = process.env.TINYAI_INSTALL_DRY_RUN === "1";
 
 const desired = {
   TINYAI_OBS_USER_NAME: process.env.TINYAI_INSTALL_USER_NAME || "",
-  TINYAI_OBS_USER_EMAIL: process.env.TINYAI_INSTALL_USER_EMAIL || "",
   TINYAI_OBS_USER_ID: process.env.TINYAI_INSTALL_USER_ID || "",
   TINYAI_OBS_TEAM: process.env.TINYAI_INSTALL_TEAM || "",
   TINYAI_OBS_COLLECTOR_URL: process.env.TINYAI_INSTALL_COLLECTOR_URL || "",

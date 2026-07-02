@@ -11,7 +11,7 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.api.ingest import _preferred_code_changes, get_raw_event_blob, get_session_detail
+from app.api.ingest import _preferred_code_changes, get_code_change_raw_detail, get_raw_event_blob, get_session_detail
 from app.config import get_settings
 from app.models import (
     AiCodeChange,
@@ -45,15 +45,111 @@ class IngestServiceTests(unittest.TestCase):
     def setUp(self):
         self.settings = get_settings()
         self.old_async_normalization = self.settings.ingest_async_normalization
+        self.old_plugin_heartbeat_min_interval_seconds = self.settings.plugin_heartbeat_min_interval_seconds
+        self.old_plugin_client_heartbeat_update_min_interval_seconds = self.settings.plugin_client_heartbeat_update_min_interval_seconds
         self.settings.ingest_async_normalization = True
+        self.settings.plugin_heartbeat_min_interval_seconds = 60
+        self.settings.plugin_client_heartbeat_update_min_interval_seconds = 60
         self.engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(bind=self.engine)
         self.db = Session(bind=self.engine)
 
     def tearDown(self):
         self.settings.ingest_async_normalization = self.old_async_normalization
+        self.settings.plugin_heartbeat_min_interval_seconds = self.old_plugin_heartbeat_min_interval_seconds
+        self.settings.plugin_client_heartbeat_update_min_interval_seconds = self.old_plugin_client_heartbeat_update_min_interval_seconds
         self.db.close()
         self.engine.dispose()
+
+    def test_git_commit_snapshots_are_ingested_and_push_snapshots_are_ignored(self):
+        now = datetime(2026, 7, 1, 20, 54, tzinfo=timezone.utc)
+        commit_event = EventIn(
+            event_id="git-commit-boundary-event",
+            task_id="commit-bb6380bd3e52eec0",
+            tool="git",
+            event_type="commit_snapshot",
+            occurred_at=now,
+            source_confidence="derived",
+            username="lyl",
+            user_id="lyl",
+            payload={
+                "snapshot_kind": "commit",
+                "commit_sha": "bb6380bd3e52eec0b39c3adee3f48b86c25db000",
+                "files_changed": 1,
+                "lines_added": 2,
+                "lines_deleted": 0,
+                "file_paths": ["src/app.py"],
+                "hook_tool": "git",
+                "hook_installer_tool": "copilot",
+                "files": [
+                    {
+                        "file_path": "src/app.py",
+                        "lines_added": 2,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 2,
+                                "lines": [
+                                    {"line_type": "added", "new_line": 1, "text": "def hello():"},
+                                    {"line_type": "added", "new_line": 2, "text": "    return 'world'"},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        push_event = EventIn(
+            event_id="git-push-boundary-event",
+            task_id="push-bb6380bd3e52eec0",
+            tool="git",
+            event_type="push_snapshot",
+            occurred_at=now,
+            source_confidence="derived",
+            username="lyl",
+            user_id="lyl",
+            payload={
+                "snapshot_kind": "push",
+                "head_sha": "bb6380bd3e52eec0b39c3adee3f48b86c25db000",
+                "upstream_ref": "origin/main",
+                "files_changed": 1,
+                "lines_added": 2,
+                "lines_deleted": 0,
+                "file_paths": ["src/app.py"],
+                "hook_tool": "git",
+                "hook_installer_tool": "copilot",
+            },
+        )
+        batch = BatchIn(
+            client_id="git-boundary-client",
+            plugin_name="tinyai-observability-git-hook",
+            plugin_version="test",
+            username="lyl",
+            user_id="lyl",
+            events=[commit_event, push_event],
+        )
+
+        result = ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        sessions = self.db.execute(select(AiSession).order_by(AiSession.session_id)).scalars().all()
+        changes = self.db.execute(select(AiCodeChange).order_by(AiCodeChange.event_id, AiCodeChange.id)).scalars().all()
+        raw_commit = self.db.get(RawIngestEvent, "git-commit-boundary-event")
+        metrics = knowledge_metrics(self.db)
+
+        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["duplicates"], 1)
+        self.assertEqual(result["events"][1]["reason"], "push_snapshot_disabled")
+        self.assertEqual(stats["succeeded"], 1)
+        self.assertEqual({session.tool for session in sessions}, {"git"})
+        self.assertEqual({change.change_type for change in changes}, {"commit_snapshot"})
+        self.assertIsNone(self.db.get(RawIngestEvent, "git-push-boundary-event"))
+        self.assertEqual(raw_commit.raw_json["event"]["payload"]["hook_installer_tool"], "copilot")
+        self.assertEqual(metrics["summary"]["session_count"], 0)
+        self.assertEqual(metrics["summary"]["commit_snapshot_count"], 1)
+        self.assertNotIn("push_snapshot_count", metrics["summary"])
 
     def test_article_reference_metrics_use_existing_spec_code_and_usage_data(self):
         now = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
@@ -484,6 +580,230 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(self.db.execute(select(PluginHeartbeat)).scalars().one().event_id, "heartbeat-123456")
         self.assertEqual(self.db.execute(select(RawIngestEvent)).scalars().all(), [])
 
+    def test_plugin_heartbeat_rate_limits_repeated_operational_rows(self):
+        first_event = EventIn(
+            event_id="heartbeat-rate-limit-1",
+            task_id="heartbeat-rate-limit-task-1",
+            tool="copilot",
+            event_type="plugin_heartbeat",
+            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            payload={"activation": "vscode"},
+            source_confidence="direct",
+            username="lyl",
+            user_id="lyl",
+            machine_id="machine-1",
+        )
+        first_batch = BatchIn(
+            client_id="client-rate-limit",
+            plugin_name="tinyai-observability-vscode",
+            plugin_version="0.1.47",
+            username="lyl",
+            user_id="lyl",
+            machine_id="machine-1",
+            events=[first_event],
+        )
+        second_event = first_event.model_copy(update={"event_id": "heartbeat-rate-limit-2", "task_id": "heartbeat-rate-limit-task-2"})
+        second_batch = first_batch.model_copy(update={"events": [second_event]})
+
+        first = ingest_batch(self.db, first_batch)
+        client = self.db.execute(select(PluginClient)).scalars().one()
+        first_seen = client.last_seen_at
+        second = ingest_batch(self.db, second_batch)
+        self.db.expire_all()
+        client_after = self.db.execute(select(PluginClient)).scalars().one()
+        heartbeats = self.db.execute(select(PluginHeartbeat)).scalars().all()
+
+        self.assertEqual(first["events"][0]["status"], "accepted")
+        self.assertEqual(second["events"][0]["status"], "duplicate")
+        self.assertEqual(second["events"][0]["reason"], "heartbeat_rate_limited")
+        self.assertEqual(len(heartbeats), 1)
+        self.assertEqual(heartbeats[0].event_id, "heartbeat-rate-limit-1")
+        self.assertEqual(client_after.last_seen_at, first_seen)
+
+    def test_plugin_client_user_id_prefers_name_over_email_and_allows_missing_machine(self):
+        event = EventIn(
+            event_id="heartbeat-email-user",
+            task_id="heartbeat-email-user-task",
+            tool="copilot",
+            event_type="plugin_heartbeat",
+            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            payload={"activation": "idea"},
+            source_confidence="direct",
+            username="liquanji",
+            user_id="quanj.li@example.com",
+            user_email="quanj.li@example.com",
+            user_display_name="李全吉",
+            model="gpt-5.3-codex",
+        )
+        batch = BatchIn(
+            client_id="client-email-user",
+            plugin_name="tinyai-observability-idea",
+            plugin_version="0.1.2",
+            username="liquanji",
+            user_id="quanj.li@example.com",
+            user_email="quanj.li@example.com",
+            user_display_name="李全吉",
+            model="gpt-5.3-codex",
+            events=[event],
+        )
+
+        result = ingest_batch(self.db, batch)
+
+        self.assertEqual(result["accepted"], 1)
+        client = self.db.execute(select(PluginClient)).scalars().one()
+        self.assertEqual(client.username, "liquanji")
+        self.assertEqual(client.user_id, "liquanji")
+        self.assertIsNone(client.machine_id)
+        self.assertEqual(client.model, "gpt-5.3-codex")
+
+    def test_plugin_client_generates_english_user_id_from_username_only(self):
+        event = EventIn(
+            event_id="heartbeat-username-only",
+            task_id="heartbeat-username-only-task",
+            tool="claude",
+            event_type="plugin_heartbeat",
+            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            payload={"activation": "claude"},
+            source_confidence="direct",
+            username="张三",
+        )
+        batch = BatchIn(
+            client_id="client-username-only",
+            plugin_name="tinyai-observability-claude",
+            plugin_version="0.1.14",
+            username="张三",
+            events=[event],
+        )
+
+        ingest_batch(self.db, batch)
+
+        client = self.db.execute(select(PluginClient)).scalars().one()
+        self.assertEqual(client.username, "张三")
+        self.assertEqual(client.user_id, "zhangsan")
+
+    def test_raw_and_heartbeat_identity_columns_do_not_store_email(self):
+        raw_event = EventIn(
+            event_id="raw-email-identity",
+            task_id="raw-email-identity-task",
+            tool="copilot",
+            event_type="code_change",
+            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            payload={"snapshot_kind": "copilot_turn_editor_delta", "files": []},
+            source_confidence="direct",
+            username="张三",
+            user_id="zhangsan@example.com",
+            user_email="zhangsan@example.com",
+        )
+        heartbeat_event = EventIn(
+            event_id="heartbeat-email-identity",
+            task_id="heartbeat-email-identity-task",
+            tool="copilot",
+            event_type="plugin_heartbeat",
+            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            payload={"activation": "vscode"},
+            source_confidence="direct",
+            username="张三",
+            user_id="zhangsan@example.com",
+            user_email="zhangsan@example.com",
+        )
+        batch = BatchIn(
+            client_id="client-email-identity",
+            plugin_name="tinyai-observability-vscode",
+            plugin_version="0.1.47",
+            username="张三",
+            user_id="zhangsan@example.com",
+            user_email="zhangsan@example.com",
+            events=[raw_event, heartbeat_event],
+        )
+
+        ingest_batch(self.db, batch)
+
+        raw = self.db.get(RawIngestEvent, "raw-email-identity")
+        heartbeat = self.db.get(PluginHeartbeat, "heartbeat-email-identity")
+        self.assertIsNotNone(raw)
+        self.assertIsNotNone(heartbeat)
+        self.assertEqual(raw.user_id, "zhangsan")
+        self.assertEqual(heartbeat.user_id, "zhangsan")
+        self.assertNotIn("user_email", raw.raw_json["batch"])
+        self.assertNotIn("user_email", raw.raw_json["event"])
+
+    def test_plugin_client_updates_existing_identity_when_client_id_changes(self):
+        first_event = EventIn(
+            event_id="heartbeat-upgrade-v1",
+            task_id="heartbeat-upgrade-task-v1",
+            tool="codex",
+            event_type="plugin_heartbeat",
+            occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            payload={"activation": "codex"},
+            source_confidence="direct",
+            username="张三",
+            host_hash="host-1",
+        )
+        first_batch = BatchIn(
+            client_id="old-client-id",
+            plugin_name="tinyai-observability-codex",
+            plugin_version="0.1.1",
+            username="张三",
+            host_hash="host-1",
+            events=[first_event],
+        )
+        second_event = EventIn(
+            event_id="heartbeat-upgrade-v2",
+            task_id="heartbeat-upgrade-task-v2",
+            tool="codex",
+            event_type="plugin_heartbeat",
+            occurred_at=datetime(2026, 6, 24, 1, tzinfo=timezone.utc),
+            payload={"activation": "codex"},
+            source_confidence="direct",
+            username="张三",
+            host_hash="host-1",
+        )
+        second_batch = BatchIn(
+            client_id="new-client-id",
+            plugin_name="tinyai-observability-codex",
+            plugin_version="0.1.2",
+            username="张三",
+            host_hash="host-1",
+            events=[second_event],
+        )
+
+        ingest_batch(self.db, first_batch)
+        ingest_batch(self.db, second_batch)
+
+        clients = self.db.execute(select(PluginClient)).scalars().all()
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0].client_id, "new-client-id")
+        self.assertEqual(clients[0].plugin_version, "0.1.2")
+        self.assertEqual(clients[0].user_id, "zhangsan")
+
+    def test_plugin_client_keeps_tools_separate_for_same_user_and_host(self):
+        for tool in ("codex", "claude"):
+            event = EventIn(
+                event_id=f"heartbeat-{tool}-same-user",
+                task_id=f"heartbeat-{tool}-same-user-task",
+                tool=tool,
+                event_type="plugin_heartbeat",
+                occurred_at=datetime(2026, 6, 24, tzinfo=timezone.utc),
+                payload={"activation": tool},
+                source_confidence="direct",
+                username="张三",
+                host_hash="host-1",
+            )
+            batch = BatchIn(
+                client_id=f"{tool}-client",
+                plugin_name=f"tinyai-observability-{tool}",
+                plugin_version="0.1.1",
+                username="张三",
+                host_hash="host-1",
+                events=[event],
+            )
+            ingest_batch(self.db, batch)
+
+        clients = self.db.execute(select(PluginClient).order_by(PluginClient.tool)).scalars().all()
+        self.assertEqual(len(clients), 2)
+        self.assertEqual([client.tool for client in clients], ["claude", "codex"])
+        self.assertEqual({client.user_id for client in clients}, {"zhangsan"})
+
     def test_install_smoke_heartbeat_does_not_register_plugin_client(self):
         cases = [
             ("codex", "codex-smoke-123456", "0.1.4+codex.20260630205023"),
@@ -723,6 +1043,110 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(detail["turns"][0]["code_changes"][0]["lines_added"], 2)
         self.assertEqual(detail["turns"][0]["code_changes"][0]["lines_deleted"], 1)
         self.assertEqual(blob["content"], large_tool_result)
+
+    def test_blobified_turn_message_persists_preview_and_blob_metadata(self):
+        full_text = "测试内容" * 3000
+        preview = full_text[:2000]
+        raw = full_text.encode("utf-8")
+        compressed = gzip.compress(raw)
+        text_hash = hashlib.sha256(raw).hexdigest()
+        event = EventIn(
+            event_id="claude-blob-message",
+            task_id="claude-blob-session",
+            session_id="claude-blob-session",
+            tool="claude",
+            event_type="turn_snapshot",
+            occurred_at=datetime(2026, 7, 1, 7, 25, 39, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="zhangsan",
+            user_id="zhangsan@example.com",
+            payload={
+                "session_id": "claude-blob-session",
+                "request_id": "request-blob-message",
+                "response_id": "response-blob-message",
+                "title": preview[:80],
+                "turn": {
+                    "turn_index": 4,
+                    "request_id": "request-blob-message",
+                    "response_id": "response-blob-message",
+                    "status": "completed",
+                    "started_at": "2026-07-01T07:25:33Z",
+                    "completed_at": "2026-07-01T07:25:39Z",
+                },
+                "messages": [
+                    {
+                        "role": "user",
+                        "source_key": "request-blob-message",
+                        "turn_index": 4,
+                        "occurred_at": "2026-07-01T07:25:33Z",
+                        "text_len": len(full_text),
+                        "text_hash": text_hash,
+                        "text_preview": preview,
+                        "text_blob_ref": {
+                            "blob_ref": "messages[0].text",
+                            "encoding": "gzip+base64",
+                            "value_type": "text",
+                            "sha256": text_hash,
+                            "original_bytes": len(raw),
+                            "compressed_bytes": len(compressed),
+                            "chunk_count": 1,
+                        },
+                    },
+                    {
+                        "role": "assistant",
+                        "source_key": "response-blob-message",
+                        "turn_index": 4,
+                        "occurred_at": "2026-07-01T07:25:39Z",
+                        "text": "收到了。",
+                        "text_hash": hashlib.sha256("收到了。".encode("utf-8")).hexdigest(),
+                    },
+                ],
+                "raw_event_blobs": [
+                    {
+                        "blob_key": "messages[0].text",
+                        "encoding": "gzip+base64",
+                        "value_type": "text",
+                        "sha256": text_hash,
+                        "original_bytes": len(raw),
+                        "compressed_bytes": len(compressed),
+                        "chunks": [base64.b64encode(compressed).decode("ascii")],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-claude-blob-message",
+            plugin_name="tinyai-observability-claude",
+            plugin_version="0.1.12",
+            username="zhangsan",
+            user_id="zhangsan@example.com",
+            events=[event],
+        )
+
+        result = ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        messages = self.db.execute(select(AiMessage).order_by(AiMessage.message_index.asc())).scalars().all()
+        detail = get_session_detail("claude-blob-session", db=self.db)
+
+        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(stats["succeeded"], 1)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0].role, "user")
+        self.assertEqual(messages[0].content, preview)
+        self.assertEqual(messages[0].content_storage, "blob_preview")
+        self.assertEqual(messages[0].text_len, len(full_text))
+        self.assertEqual(messages[0].text_hash, text_hash)
+        self.assertEqual(messages[0].blob_ref, "messages[0].text")
+        self.assertEqual(messages[0].blob_encoding, "gzip+base64")
+        self.assertEqual(messages[0].blob_original_bytes, len(raw))
+        self.assertEqual(messages[0].blob_compressed_bytes, len(compressed))
+        self.assertEqual(messages[0].blob_sha256, text_hash)
+        self.assertEqual(messages[1].content_storage, "inline")
+        self.assertEqual(self.db.execute(select(RawEventBlob)).scalars().one().blob_key, "messages[0].text")
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["content"], preview)
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["content_storage"], "blob_preview")
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["blob_ref"], "messages[0].text")
+        self.assertEqual(detail["turns"][0]["user_messages"][0]["blob_original_bytes"], len(raw))
 
     def test_claude_conversation_and_turn_snapshots_do_not_duplicate_messages(self):
         conversation_event = EventIn(
@@ -1913,6 +2337,10 @@ class IngestServiceTests(unittest.TestCase):
         self.assertLess(len(json.dumps(change.diff_json, ensure_ascii=False)), 20_000)
         self.assertEqual(change.lines_added, 1)
         self.assertTrue(change.diff_json["line_detail_truncated"])
+        raw_detail = get_code_change_raw_detail(change.id, db=self.db)
+        self.assertEqual(raw_detail["source"], "raw_event_rehydrated")
+        self.assertEqual(raw_detail["blob_count"], 1)
+        self.assertEqual(raw_detail["code_change"]["hunks"][0]["lines"][0]["text"], large_line)
 
         commit = EventIn(
             event_id="commit-matches-files-blob",
@@ -3358,6 +3786,68 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(len(ledger_rows), 1)
         self.assertEqual(ledger_rows[0].text_preview, "answer = 42")
         self.assertEqual(ledger_rows[0].classification, "ai_current")
+
+    def test_relative_line_numbers_do_not_write_line_attribution_ledger(self):
+        file_path = "collector-server/tests/relative_ledger.py"
+
+        def line_hash(text: str) -> str:
+            return hashlib.sha256(f"{file_path}\0{text}".encode("utf-8")).hexdigest()
+
+        ai_change = EventIn(
+            event_id="relative-ledger-code-change",
+            task_id="task-relative-ledger",
+            session_id="copilot-session-relative-ledger",
+            tool="copilot",
+            event_type="code_change",
+            occurred_at=datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc),
+            source_confidence="direct",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "session_id": "copilot-session-relative-ledger",
+                "request_id": "request-ai",
+                "response_id": "response-ai",
+                "snapshot_kind": "copilot_turn_workspace_diff",
+                "line_number_basis": "relative",
+                "file_path": file_path,
+                "lines_added": 1,
+                "lines_deleted": 0,
+                "hunks": [
+                    {
+                        "old_start": 1,
+                        "old_lines": 0,
+                        "new_start": 1,
+                        "new_lines": 1,
+                        "lines": [
+                            {"line_type": "added", "new_line": 1, "text": "relative = True", "text_hash": line_hash("relative = True")},
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-1",
+            plugin_name="tinyai-observability-vscode",
+            plugin_version="0.1.35",
+            username="lyl",
+            user_id="user-1",
+            events=[ai_change],
+        )
+
+        ingest_batch(self.db, batch)
+        ingest_stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker", process_line_jobs=False)
+
+        self.assertEqual(ingest_stats["succeeded"], 1)
+        code_change = self.db.execute(select(AiCodeChange)).scalars().one()
+        self.assertEqual(code_change.file_path, file_path)
+        self.assertEqual(code_change.diff_json["line_number_basis"], "relative")
+        self.assertFalse(code_change.diff_json["line_numbers_are_absolute"])
+
+        line_stats = process_pending_line_attribution_jobs(self.db, limit=10, worker_id="line-worker")
+        ledger_rows = self.db.execute(select(AiLineAttribution).where(AiLineAttribution.file_path == file_path)).scalars().all()
+
+        self.assertEqual(line_stats["succeeded"], 1)
+        self.assertEqual(ledger_rows, [])
 
     def test_new_file_commit_marks_positionally_rewritten_ai_line_as_ai_assisted(self):
         file_path = "openspec/specs/杜甫.md"

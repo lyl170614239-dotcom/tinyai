@@ -1,9 +1,13 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { open, readdir, readFile, stat } from "node:fs/promises";
+import { promisify } from "node:util";
 
 import { stableEventId } from "./event-schema.js";
+
+const execFileAsync = promisify(execFile);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -50,6 +54,8 @@ type ClaudeCodeChange = {
   file_path: string;
   lines_added: number;
   lines_deleted: number;
+  line_number_basis?: "absolute" | "relative";
+  line_numbers_are_absolute?: boolean;
   hunks: Array<{
     old_start: number;
     old_lines: number;
@@ -404,14 +410,175 @@ function lineHash(filePath: string, text: string): string {
   return hashText(`${filePath}\0${text}`);
 }
 
-function diffFromReplacement(
+function splitReplacementLines(value: string): string[] {
+  const lines = value.split(/\r?\n/);
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function countLinesBefore(value: string, index: number): number {
+  if (index <= 0) return 0;
+  let count = 0;
+  for (let cursor = 0; cursor < index; cursor += 1) {
+    if (value.charCodeAt(cursor) === 10) count += 1;
+  }
+  return count;
+}
+
+function uniqueIndexOf(haystack: string, needle: string): number | undefined {
+  if (!needle) return undefined;
+  const first = haystack.indexOf(needle);
+  if (first < 0) return undefined;
+  return haystack.indexOf(needle, first + needle.length) < 0 ? first : undefined;
+}
+
+function sequenceStartIndexes(haystack: string[], needle: string[]): number[] {
+  if (needle.length === 0 || needle.length > haystack.length) return [];
+  const matches: number[] = [];
+  for (let index = 0; index <= haystack.length - needle.length; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < needle.length; offset += 1) {
+      if (haystack[index + offset] !== needle[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) matches.push(index);
+  }
+  return matches;
+}
+
+function resolvedToolFilePath(filePath: string, workspacePath?: string, cwd?: string): string | undefined {
+  if (isAbsolute(filePath)) return filePath;
+  const root = cwd || workspacePath;
+  return root ? resolve(root, filePath) : undefined;
+}
+
+function gitPathspec(filePath: string, workspacePath?: string, cwd?: string): { root: string; pathspec: string } | undefined {
+  const root = cwd || workspacePath;
+  if (!root || filePath.includes("\0")) return undefined;
+  const absolutePath = resolvedToolFilePath(filePath, workspacePath, cwd);
+  if (!absolutePath) return undefined;
+  const pathspec = isAbsolute(filePath) ? relative(root, absolutePath).replace(/\\/g, "/") : filePath.replace(/^\.?\//, "").replace(/\\/g, "/");
+  if (!pathspec || pathspec.startsWith("../") || pathspec === ".." || isAbsolute(pathspec)) return undefined;
+  return { root, pathspec };
+}
+
+type DiffLineRecord = {
+  line_type: "added" | "removed" | "context";
+  old_line?: number;
+  new_line?: number;
+  text: string;
+};
+
+function parseGitDiffLines(diff: string): Array<{ old_start: number; new_start: number; lines: DiffLineRecord[] }> {
+  const hunks: Array<{ old_start: number; new_start: number; lines: DiffLineRecord[] }> = [];
+  let current: (typeof hunks)[number] | undefined;
+  let oldLine = 0;
+  let newLine = 0;
+  for (const line of diff.split(/\r?\n/)) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      oldLine = Number.parseInt(hunk[1], 10);
+      newLine = Number.parseInt(hunk[2], 10);
+      current = { old_start: oldLine, new_start: newLine, lines: [] };
+      hunks.push(current);
+      continue;
+    }
+    if (!current || line.startsWith("\\ No newline")) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      current.lines.push({ line_type: "added", new_line: newLine, text: line.slice(1) });
+      newLine += 1;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      current.lines.push({ line_type: "removed", old_line: oldLine, text: line.slice(1) });
+      oldLine += 1;
+    } else if (line.startsWith(" ")) {
+      current.lines.push({ line_type: "context", old_line: oldLine, new_line: newLine, text: line.slice(1) });
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return hunks;
+}
+
+async function gitDiffText(root: string, pathspec: string, staged: boolean): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", "diff", ...(staged ? ["--cached"] : []), "--unified=0", "--no-color", "--", pathspec], {
+      cwd: root,
+      timeout: 20000,
+      maxBuffer: 1024 * 1024 * 100
+    });
+    return String(stdout || "");
+  } catch {
+    return "";
+  }
+}
+
+function lineSequenceLocation(
+  hunks: Array<{ old_start: number; new_start: number; lines: DiffLineRecord[] }>,
+  oldLines: string[],
+  newLines: string[]
+): { oldStart: number; newStart: number } | undefined {
+  const candidates: Array<{ oldStart: number; newStart: number }> = [];
+  for (const hunk of hunks) {
+    const removed = hunk.lines.filter((line) => line.line_type === "removed");
+    const added = hunk.lines.filter((line) => line.line_type === "added");
+    const removedMatches = oldLines.length > 0 ? sequenceStartIndexes(removed.map((line) => line.text), oldLines) : [0];
+    const addedMatches = newLines.length > 0 ? sequenceStartIndexes(added.map((line) => line.text), newLines) : [0];
+    for (const removedIndex of removedMatches) {
+      for (const addedIndex of addedMatches) {
+        const oldStart = oldLines.length > 0 ? removed[removedIndex]?.old_line : added[addedIndex]?.new_line;
+        const newStart = newLines.length > 0 ? added[addedIndex]?.new_line : removed[removedIndex]?.old_line;
+        if (oldStart && newStart) candidates.push({ oldStart, newStart });
+      }
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+async function absoluteReplacementLocation(
+  filePath: string,
+  oldText: string,
+  newText: string,
+  workspacePath?: string,
+  cwd?: string
+): Promise<{ oldStart: number; newStart: number } | undefined> {
+  const absolutePath = resolvedToolFilePath(filePath, workspacePath, cwd);
+  if (absolutePath && newText) {
+    try {
+      const content = await readFile(absolutePath, "utf8");
+      const matchIndex = uniqueIndexOf(content, newText);
+      if (matchIndex !== undefined) {
+        const startLine = countLinesBefore(content, matchIndex) + 1;
+        return { oldStart: startLine, newStart: startLine };
+      }
+    } catch {
+      // Fall through to git diff based resolution.
+    }
+  }
+
+  const spec = gitPathspec(filePath, workspacePath, cwd);
+  if (!spec) return undefined;
+  const oldLines = splitReplacementLines(oldText);
+  const newLines = splitReplacementLines(newText);
+  for (const staged of [false, true]) {
+    const diff = await gitDiffText(spec.root, spec.pathspec, staged);
+    const location = lineSequenceLocation(parseGitDiffLines(diff), oldLines, newLines);
+    if (location) return location;
+  }
+  return undefined;
+}
+
+async function diffFromReplacement(
   args: JsonRecord,
   toolName: string,
   toolCallId: string,
   requestId?: string,
   responseId?: string,
   turnIndex?: number,
-): ClaudeCodeChange | undefined {
+  workspacePath?: string,
+  cwd?: string,
+): Promise<ClaudeCodeChange | undefined> {
   const filePath = filePathFromArgs(args);
   if (!filePath) return undefined;
   const oldText =
@@ -426,13 +593,17 @@ function diffFromReplacement(
     cleanString(args.content) ??
     "";
   if (!oldText && !newText) return undefined;
-  const oldLines = oldText.split(/\r?\n/).filter((line) => line.length > 0);
-  const newLines = newText.split(/\r?\n/).filter((line) => line.length > 0);
+  const oldLines = splitReplacementLines(oldText);
+  const newLines = splitReplacementLines(newText);
+  const absoluteLocation = await absoluteReplacementLocation(filePath, oldText, newText, workspacePath, cwd);
+  const oldLineOffset = absoluteLocation !== undefined ? absoluteLocation.oldStart - 1 : 0;
+  const newLineOffset = absoluteLocation !== undefined ? absoluteLocation.newStart - 1 : 0;
+  const lineNumberBasis = absoluteLocation !== undefined ? "absolute" : "relative";
   const lines: ClaudeCodeChange["hunks"][number]["lines"] = [];
   oldLines.forEach((line, index) => {
     lines.push({
       line_type: "removed",
-      old_line: index + 1,
+      old_line: oldLineOffset + index + 1,
       text: line,
       text_hash: lineHash(filePath, line)
     });
@@ -440,7 +611,7 @@ function diffFromReplacement(
   newLines.forEach((line, index) => {
     lines.push({
       line_type: "added",
-      new_line: index + 1,
+      new_line: newLineOffset + index + 1,
       text: line,
       text_hash: lineHash(filePath, line)
     });
@@ -450,11 +621,13 @@ function diffFromReplacement(
     file_path: filePath,
     lines_added: newLines.length,
     lines_deleted: oldLines.length,
+    line_number_basis: lineNumberBasis,
+    line_numbers_are_absolute: lineNumberBasis === "absolute",
     hunks: [
       {
-        old_start: 1,
+        old_start: oldLineOffset + 1,
         old_lines: oldLines.length,
-        new_start: 1,
+        new_start: newLineOffset + 1,
         new_lines: newLines.length,
         lines
       }
@@ -610,7 +783,7 @@ function isFailedToolResult(rec: JsonRecord, entry: JsonRecord): boolean {
   return false;
 }
 
-function attachAssistantBlocks(turn: WorkingTurn, entry: JsonRecord): void {
+async function attachAssistantBlocks(turn: WorkingTurn, entry: JsonRecord, workspacePath?: string): Promise<void> {
   const message = record(entry.message);
   const at = isoTimestamp(entry.timestamp);
   updateTurnContext(turn, entry);
@@ -677,7 +850,7 @@ function attachAssistantBlocks(turn: WorkingTurn, entry: JsonRecord): void {
         actor_type: "assistant"
       });
       if (["replace_string_in_file", "edit_file", "create_file"].includes(toolName)) {
-        const change = diffFromReplacement(args, toolName, toolCallId, turn.requestId, responseId, turn.turnIndex);
+        const change = await diffFromReplacement(args, toolName, toolCallId, turn.requestId, responseId, turn.turnIndex, workspacePath, turn.cwd);
         if (change) turn.codeChanges.push(change);
       }
       continue;
@@ -940,7 +1113,7 @@ export async function captureLatestClaudeTurnSnapshots(
     }
     if (entry.type === "assistant") {
       const message = record(entry.message);
-      attachAssistantBlocks(current, entry);
+      await attachAssistantBlocks(current, entry, options.workspacePath);
       current.endOffset = lineEndOffset;
       const text = assistantTextFromEntry(entry);
       const at = isoTimestamp(entry.timestamp);

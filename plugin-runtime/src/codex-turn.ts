@@ -168,7 +168,8 @@ export function codexTurnSnapshotPayload(
   const codeChanges = snapshot.code_edits || [];
   const processSteps = scoped.processSteps;
   const title = latestUserMessage?.text ? latestUserMessage.text.slice(0, 120) : "codex 会话";
-  const status = snapshot.latest_turn_complete === false ? "incomplete" : "completed";
+  const aborted = snapshot.latest_turn_aborted === true;
+  const status = aborted ? "failed" : snapshot.latest_turn_complete === false ? "incomplete" : "completed";
 
   return {
     schema_version: "codex.turn_snapshot.v1",
@@ -188,7 +189,8 @@ export function codexTurnSnapshotPayload(
       request_id: requestId,
       response_id: responseId,
       started_at: latestUsage?.occurred_at,
-      completed_at: latestUsage?.occurred_at
+      completed_at: latestUsage?.occurred_at,
+      ...(aborted ? { interrupted: true, finish_reason: "user_interrupted" } : {})
     },
     model: snapshot.model,
     resolved_model: snapshot.resolved_model || snapshot.model,
@@ -216,6 +218,8 @@ export function codexTurnSnapshotPayload(
       turn_started_count: snapshot.turn_started_count,
       turn_completed_count: snapshot.turn_completed_count,
       turn_aborted_count: snapshot.turn_aborted_count,
+      latest_turn_aborted: snapshot.latest_turn_aborted,
+      latest_turn_terminal: snapshot.latest_turn_terminal,
       task_repeat_attempts: snapshot.task_repeat_attempts,
       tool_call_count: snapshot.tool_call_count,
       tool_result_count: snapshot.tool_result_count,

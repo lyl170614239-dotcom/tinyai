@@ -2,21 +2,30 @@
 import { cwd } from "node:process";
 import { backfillRecentClaudeTurns } from "./claude-backfill.js";
 import { CollectorClient } from "./client.js";
-import { loadTinyAiEnvFile, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool } from "./config.js";
+import { loadTinyAiEnvFile, tinyAiAutoInstallGitHooksEnabled, tinyAiCollectorFallbackUrlsForTool, tinyAiCollectorUrlForTool } from "./config.js";
 import { buildCodexTurnSnapshotEvent, codexSnapshotSignature } from "./codex-turn.js";
-import { captureLatestConversation, commitConversationCursor } from "./conversation.js";
-import { makeEvent, stableEventId, type ToolName } from "./event-schema.js";
-import { commitSnapshot, diffSummary, installGitHooks, markAiActivity, pushSnapshot, recordAiLineSnapshot } from "./git.js";
+import { captureLatestConversation, codexTerminalTurnSnapshots, commitConversationCursor } from "./conversation.js";
+import { makeEvent, resolveUserIdentityForTool, stableEventId, type ToolName } from "./event-schema.js";
+import { commitSnapshot, diffSummary, installGitHooks, markAiActivity, recordAiLineSnapshot } from "./git.js";
+import { resolvePluginVersion } from "./plugin-version.js";
 import { readSpec, searchSpecs } from "./spec-detector.js";
 
 loadTinyAiEnvFile(process.env.TINYAI_OBS_WORKSPACE || cwd());
 const workspacePath = process.env.TINYAI_OBS_WORKSPACE || cwd();
 const tool = (process.env.TINYAI_OBS_TOOL || "codex") as ToolName;
+const pluginVersion = resolvePluginVersion();
 const client = new CollectorClient({
   tool,
   workspacePath,
   baseUrl: tinyAiCollectorUrlForTool(tool, workspacePath),
   fallbackUrls: tinyAiCollectorFallbackUrlsForTool(tool, workspacePath)
+});
+const gitBoundaryTool: ToolName = "git";
+const gitBoundaryClient = new CollectorClient({
+  tool: gitBoundaryTool,
+  workspacePath,
+  baseUrl: tinyAiCollectorUrlForTool(gitBoundaryTool, workspacePath),
+  fallbackUrls: tinyAiCollectorFallbackUrlsForTool(gitBoundaryTool, workspacePath)
 });
 let codexAutoCaptureTimer: ReturnType<typeof setInterval> | undefined;
 let claudeBackfillTimer: ReturnType<typeof setInterval> | undefined;
@@ -25,6 +34,7 @@ let codexAutoCaptureInFlight = false;
 let claudeBackfillInFlight = false;
 let lastCodexAutoCaptureSignature: string | undefined;
 let pluginHeartbeatUploaded = false;
+let gitHooksAutoInstallAttempted = false;
 
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number; method: string; params?: any };
 
@@ -69,16 +79,8 @@ const tools = [
     }
   },
   {
-    name: "tinyai_git.push_snapshot",
-    description: "Record the current branch diff against its upstream as AI-attributed pushed/PR code.",
-    inputSchema: {
-      type: "object",
-      properties: {}
-    }
-  },
-  {
     name: "tinyai_git.install_hooks",
-    description: "Install local post-commit and pre-push hooks that automatically record AI-attributed commit and push code metrics.",
+    description: "Install a local post-commit hook that records AI-attributed commit code metrics.",
     inputSchema: {
       type: "object",
       properties: {}
@@ -204,34 +206,16 @@ async function handleToolCall(name: string, args: Record<string, unknown>) {
       aiAssisted: true,
       attributionEvidence: "manual_mcp_commit_snapshot"
     });
-    await client.upload(tool, [
+    await gitBoundaryClient.upload(gitBoundaryTool, [
       makeEvent({
-        tool,
+        tool: gitBoundaryTool,
         eventType: "commit_snapshot",
         taskId: snapshot.commit_sha ? `commit-${snapshot.commit_sha.slice(0, 16)}` : undefined,
         workspacePath,
-        payload: { ...snapshot },
+        payload: { ...snapshot, hook_tool: gitBoundaryTool, hook_installer_tool: tool },
+        userIdentity: resolveUserIdentityForTool(tool),
         sourceConfidence: "derived",
-        eventId: snapshot.commit_sha ? stableEventId(`${tool}:commit_snapshot:${workspacePath}:${snapshot.commit_sha}`) : undefined
-      })
-    ]);
-    return { content: [{ type: "text", text: JSON.stringify({ ok: true, snapshot }, null, 2) }] };
-  }
-  if (name === "tinyai_git.push_snapshot") {
-    const snapshot = await pushSnapshot(workspacePath, {
-      aiAssisted: true,
-      attributionEvidence: "manual_mcp_push_snapshot"
-    });
-    const rangeKey = snapshot.head_sha ? `${snapshot.upstream_ref || ""}:${snapshot.base_sha || ""}:${snapshot.head_sha}` : "";
-    await client.upload(tool, [
-      makeEvent({
-        tool,
-        eventType: "push_snapshot",
-        taskId: snapshot.head_sha ? `push-${snapshot.head_sha.slice(0, 16)}` : undefined,
-        workspacePath,
-        payload: { ...snapshot },
-        sourceConfidence: "derived",
-        eventId: rangeKey ? stableEventId(`${tool}:push_snapshot:${workspacePath}:${rangeKey}`) : undefined
+        eventId: snapshot.commit_sha ? stableEventId(`${gitBoundaryTool}:commit_snapshot:${workspacePath}:${snapshot.commit_sha}`) : undefined
       })
     ]);
     return { content: [{ type: "text", text: JSON.stringify({ ok: true, snapshot }, null, 2) }] };
@@ -241,7 +225,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>) {
       tool,
       collectorUrl: tinyAiCollectorUrlForTool(tool, workspacePath),
       fallbackUrls: tinyAiCollectorFallbackUrlsForTool(tool, workspacePath),
-      pluginVersion: process.env.TINYAI_OBS_PLUGIN_VERSION
+      pluginVersion
     });
     await client.upload(tool, [
       makeEvent({
@@ -323,7 +307,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>) {
   }
   if (name === "tinyai_conversation.capture_latest") {
     await markAiActivity(workspacePath, { tool, source: "tinyai_conversation.capture_latest" });
-    const snapshot = await captureLatestConversation(tool, { latestTurnOnly: tool === "codex" });
+    const snapshot = await captureLatestConversation(tool, { latestTurnOnly: false });
     if (snapshot.message_count <= 0 && !snapshot.process_steps?.length && !snapshot.code_edits?.length) {
       return {
         content: [
@@ -346,7 +330,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>) {
         ]
       };
     }
-    if (tool === "codex" && snapshot.latest_turn_complete === false) {
+    if (tool === "codex" && snapshot.latest_turn_terminal === false) {
       return {
         content: [
           {
@@ -355,7 +339,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>) {
               {
                 ok: false,
                 skipped: true,
-                reason: "latest Codex turn is still in progress; waiting for task_complete before upload",
+                reason: "latest Codex turn is still in progress; waiting for task_complete or turn_aborted before upload",
                 session_id: snapshot.session_id,
                 message_count: snapshot.message_count
               },
@@ -367,14 +351,14 @@ async function handleToolCall(name: string, args: Record<string, unknown>) {
       };
     }
     const eventWorkspacePath = snapshot.cwd || workspacePath;
-    const snapshotSignature = codexSnapshotSignature(snapshot);
+    const codexSnapshots = tool === "codex" ? codexTerminalTurnSnapshots(snapshot) : [];
     const events = tool === "codex"
-      ? [
-          buildCodexTurnSnapshotEvent(snapshot, {
+      ? codexSnapshots.map((turnSnapshot) =>
+          buildCodexTurnSnapshotEvent(turnSnapshot, {
             workspacePath: eventWorkspacePath,
             snapshotKind: "codex_mcp_capture"
           })
-        ]
+        )
       : [
           makeEvent({
             tool,
@@ -492,21 +476,22 @@ async function autoCaptureLatestCodexConversation(): Promise<void> {
     const includeText = !["0", "false", "no", "off"].includes(
       String(process.env.TINYAI_OBS_CAPTURE_CONVERSATION_TEXT || "true").toLowerCase()
     );
-    const snapshot = await captureLatestConversation("codex", { includeText, latestTurnOnly: true });
-    if (snapshot.latest_turn_complete === false) return;
-    const eventWorkspacePath = snapshot.cwd || workspacePath;
-    const signature = codexSnapshotSignature(snapshot);
+    const snapshot = await captureLatestConversation("codex", { includeText, latestTurnOnly: false });
+    if (snapshot.latest_turn_terminal === false) return;
+    const turnSnapshots = codexTerminalTurnSnapshots(snapshot);
+    if (turnSnapshots.length === 0) return;
+    const signature = turnSnapshots.map((turnSnapshot) => codexSnapshotSignature(turnSnapshot)).join(":");
     if (signature === lastCodexAutoCaptureSignature) return;
 
     const sessionId = snapshot.session_id;
     const taskId = sessionId || `codex-auto-${signature}`.slice(0, 64);
-    const events = [
-      buildCodexTurnSnapshotEvent(snapshot, {
+    const events = turnSnapshots.map((turnSnapshot) =>
+      buildCodexTurnSnapshotEvent(turnSnapshot, {
         taskId,
-        workspacePath: eventWorkspacePath,
+        workspacePath: turnSnapshot.cwd || workspacePath,
         snapshotKind: "codex_mcp_auto_capture"
       })
-    ];
+    );
     await client.upload("codex", events);
     await commitConversationCursor(snapshot);
     lastCodexAutoCaptureSignature = signature;
@@ -567,6 +552,19 @@ function startClaudeBackfill(): void {
 }
 
 async function markMcpInitialized(): Promise<void> {
+  if (tool === "codex" && !gitHooksAutoInstallAttempted && tinyAiAutoInstallGitHooksEnabled(workspacePath)) {
+    gitHooksAutoInstallAttempted = true;
+    try {
+      await installGitHooks(workspacePath, {
+        tool,
+        collectorUrl: tinyAiCollectorUrlForTool(tool, workspacePath),
+        fallbackUrls: tinyAiCollectorFallbackUrlsForTool(tool, workspacePath),
+        pluginVersion
+      });
+    } catch {
+      // Not every Codex session runs inside a Git repository.
+    }
+  }
   if (!pluginHeartbeatUploaded) {
     await client.upload(tool, [makeEvent({ tool, eventType: "plugin_heartbeat", workspacePath, payload: { mcp: true } })]);
     pluginHeartbeatUploaded = true;
@@ -604,7 +602,7 @@ process.stdin.on("data", async (chunk) => {
         respond(request.id, {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "tinyai-observability", version: process.env.TINYAI_OBS_PLUGIN_VERSION || "0.1.0" }
+          serverInfo: { name: "tinyai-observability", version: pluginVersion }
         });
         void markMcpInitialized();
       } else if (request.method === "tools/list") {

@@ -100,6 +100,16 @@ export function tinyAiEnvValue(key: string, workspacePath?: string): string | un
   return cleanConfiguredValue(process.env[key]) || cleanConfiguredValue(readTinyAiEnvFile(workspacePath).values[key]);
 }
 
+export function tinyAiBooleanEnvValue(key: string, defaultValue: boolean, workspacePath?: string): boolean {
+  const value = tinyAiEnvValue(key, workspacePath);
+  if (value === undefined) return defaultValue;
+  return !["0", "false", "no", "off"].includes(value.toLowerCase());
+}
+
+export function tinyAiAutoInstallGitHooksEnabled(workspacePath?: string): boolean {
+  return tinyAiBooleanEnvValue("TINYAI_OBS_AUTO_INSTALL_GIT_HOOKS", true, workspacePath);
+}
+
 function normalizeToolName(tool?: TinyAiToolName): string | undefined {
   const normalized = String(tool || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return normalized || undefined;

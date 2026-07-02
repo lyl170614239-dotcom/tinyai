@@ -1,8 +1,11 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { open, readdir, readFile, stat } from "node:fs/promises";
+import { promisify } from "node:util";
 import { stableEventId } from "./event-schema.js";
+const execFileAsync = promisify(execFile);
 export const CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.3";
 const JSONL_READ_CHUNK_BYTES = 1024 * 1024;
 const CLAUDE_NON_PROMPT_TAGS = [
@@ -264,7 +267,157 @@ function toolSummary(toolName, args) {
 function lineHash(filePath, text) {
     return hashText(`${filePath}\0${text}`);
 }
-function diffFromReplacement(args, toolName, toolCallId, requestId, responseId, turnIndex) {
+function splitReplacementLines(value) {
+    const lines = value.split(/\r?\n/);
+    if (lines.length && lines[lines.length - 1] === "")
+        lines.pop();
+    return lines;
+}
+function countLinesBefore(value, index) {
+    if (index <= 0)
+        return 0;
+    let count = 0;
+    for (let cursor = 0; cursor < index; cursor += 1) {
+        if (value.charCodeAt(cursor) === 10)
+            count += 1;
+    }
+    return count;
+}
+function uniqueIndexOf(haystack, needle) {
+    if (!needle)
+        return undefined;
+    const first = haystack.indexOf(needle);
+    if (first < 0)
+        return undefined;
+    return haystack.indexOf(needle, first + needle.length) < 0 ? first : undefined;
+}
+function sequenceStartIndexes(haystack, needle) {
+    if (needle.length === 0 || needle.length > haystack.length)
+        return [];
+    const matches = [];
+    for (let index = 0; index <= haystack.length - needle.length; index += 1) {
+        let matched = true;
+        for (let offset = 0; offset < needle.length; offset += 1) {
+            if (haystack[index + offset] !== needle[offset]) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched)
+            matches.push(index);
+    }
+    return matches;
+}
+function resolvedToolFilePath(filePath, workspacePath, cwd) {
+    if (isAbsolute(filePath))
+        return filePath;
+    const root = cwd || workspacePath;
+    return root ? resolve(root, filePath) : undefined;
+}
+function gitPathspec(filePath, workspacePath, cwd) {
+    const root = cwd || workspacePath;
+    if (!root || filePath.includes("\0"))
+        return undefined;
+    const absolutePath = resolvedToolFilePath(filePath, workspacePath, cwd);
+    if (!absolutePath)
+        return undefined;
+    const pathspec = isAbsolute(filePath) ? relative(root, absolutePath).replace(/\\/g, "/") : filePath.replace(/^\.?\//, "").replace(/\\/g, "/");
+    if (!pathspec || pathspec.startsWith("../") || pathspec === ".." || isAbsolute(pathspec))
+        return undefined;
+    return { root, pathspec };
+}
+function parseGitDiffLines(diff) {
+    const hunks = [];
+    let current;
+    let oldLine = 0;
+    let newLine = 0;
+    for (const line of diff.split(/\r?\n/)) {
+        const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+        if (hunk) {
+            oldLine = Number.parseInt(hunk[1], 10);
+            newLine = Number.parseInt(hunk[2], 10);
+            current = { old_start: oldLine, new_start: newLine, lines: [] };
+            hunks.push(current);
+            continue;
+        }
+        if (!current || line.startsWith("\\ No newline"))
+            continue;
+        if (line.startsWith("+") && !line.startsWith("+++")) {
+            current.lines.push({ line_type: "added", new_line: newLine, text: line.slice(1) });
+            newLine += 1;
+        }
+        else if (line.startsWith("-") && !line.startsWith("---")) {
+            current.lines.push({ line_type: "removed", old_line: oldLine, text: line.slice(1) });
+            oldLine += 1;
+        }
+        else if (line.startsWith(" ")) {
+            current.lines.push({ line_type: "context", old_line: oldLine, new_line: newLine, text: line.slice(1) });
+            oldLine += 1;
+            newLine += 1;
+        }
+    }
+    return hunks;
+}
+async function gitDiffText(root, pathspec, staged) {
+    try {
+        const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", "diff", ...(staged ? ["--cached"] : []), "--unified=0", "--no-color", "--", pathspec], {
+            cwd: root,
+            timeout: 20000,
+            maxBuffer: 1024 * 1024 * 100
+        });
+        return String(stdout || "");
+    }
+    catch {
+        return "";
+    }
+}
+function lineSequenceLocation(hunks, oldLines, newLines) {
+    const candidates = [];
+    for (const hunk of hunks) {
+        const removed = hunk.lines.filter((line) => line.line_type === "removed");
+        const added = hunk.lines.filter((line) => line.line_type === "added");
+        const removedMatches = oldLines.length > 0 ? sequenceStartIndexes(removed.map((line) => line.text), oldLines) : [0];
+        const addedMatches = newLines.length > 0 ? sequenceStartIndexes(added.map((line) => line.text), newLines) : [0];
+        for (const removedIndex of removedMatches) {
+            for (const addedIndex of addedMatches) {
+                const oldStart = oldLines.length > 0 ? removed[removedIndex]?.old_line : added[addedIndex]?.new_line;
+                const newStart = newLines.length > 0 ? added[addedIndex]?.new_line : removed[removedIndex]?.old_line;
+                if (oldStart && newStart)
+                    candidates.push({ oldStart, newStart });
+            }
+        }
+    }
+    return candidates.length === 1 ? candidates[0] : undefined;
+}
+async function absoluteReplacementLocation(filePath, oldText, newText, workspacePath, cwd) {
+    const absolutePath = resolvedToolFilePath(filePath, workspacePath, cwd);
+    if (absolutePath && newText) {
+        try {
+            const content = await readFile(absolutePath, "utf8");
+            const matchIndex = uniqueIndexOf(content, newText);
+            if (matchIndex !== undefined) {
+                const startLine = countLinesBefore(content, matchIndex) + 1;
+                return { oldStart: startLine, newStart: startLine };
+            }
+        }
+        catch {
+            // Fall through to git diff based resolution.
+        }
+    }
+    const spec = gitPathspec(filePath, workspacePath, cwd);
+    if (!spec)
+        return undefined;
+    const oldLines = splitReplacementLines(oldText);
+    const newLines = splitReplacementLines(newText);
+    for (const staged of [false, true]) {
+        const diff = await gitDiffText(spec.root, spec.pathspec, staged);
+        const location = lineSequenceLocation(parseGitDiffLines(diff), oldLines, newLines);
+        if (location)
+            return location;
+    }
+    return undefined;
+}
+async function diffFromReplacement(args, toolName, toolCallId, requestId, responseId, turnIndex, workspacePath, cwd) {
     const filePath = filePathFromArgs(args);
     if (!filePath)
         return undefined;
@@ -279,13 +432,17 @@ function diffFromReplacement(args, toolName, toolCallId, requestId, responseId, 
         "";
     if (!oldText && !newText)
         return undefined;
-    const oldLines = oldText.split(/\r?\n/).filter((line) => line.length > 0);
-    const newLines = newText.split(/\r?\n/).filter((line) => line.length > 0);
+    const oldLines = splitReplacementLines(oldText);
+    const newLines = splitReplacementLines(newText);
+    const absoluteLocation = await absoluteReplacementLocation(filePath, oldText, newText, workspacePath, cwd);
+    const oldLineOffset = absoluteLocation !== undefined ? absoluteLocation.oldStart - 1 : 0;
+    const newLineOffset = absoluteLocation !== undefined ? absoluteLocation.newStart - 1 : 0;
+    const lineNumberBasis = absoluteLocation !== undefined ? "absolute" : "relative";
     const lines = [];
     oldLines.forEach((line, index) => {
         lines.push({
             line_type: "removed",
-            old_line: index + 1,
+            old_line: oldLineOffset + index + 1,
             text: line,
             text_hash: lineHash(filePath, line)
         });
@@ -293,7 +450,7 @@ function diffFromReplacement(args, toolName, toolCallId, requestId, responseId, 
     newLines.forEach((line, index) => {
         lines.push({
             line_type: "added",
-            new_line: index + 1,
+            new_line: newLineOffset + index + 1,
             text: line,
             text_hash: lineHash(filePath, line)
         });
@@ -303,11 +460,13 @@ function diffFromReplacement(args, toolName, toolCallId, requestId, responseId, 
         file_path: filePath,
         lines_added: newLines.length,
         lines_deleted: oldLines.length,
+        line_number_basis: lineNumberBasis,
+        line_numbers_are_absolute: lineNumberBasis === "absolute",
         hunks: [
             {
-                old_start: 1,
+                old_start: oldLineOffset + 1,
                 old_lines: oldLines.length,
-                new_start: 1,
+                new_start: newLineOffset + 1,
                 new_lines: newLines.length,
                 lines
             }
@@ -433,7 +592,7 @@ function isFailedToolResult(rec, entry) {
     }
     return false;
 }
-function attachAssistantBlocks(turn, entry) {
+async function attachAssistantBlocks(turn, entry, workspacePath) {
     const message = record(entry.message);
     const at = isoTimestamp(entry.timestamp);
     updateTurnContext(turn, entry);
@@ -502,7 +661,7 @@ function attachAssistantBlocks(turn, entry) {
                 actor_type: "assistant"
             });
             if (["replace_string_in_file", "edit_file", "create_file"].includes(toolName)) {
-                const change = diffFromReplacement(args, toolName, toolCallId, turn.requestId, responseId, turn.turnIndex);
+                const change = await diffFromReplacement(args, toolName, toolCallId, turn.requestId, responseId, turn.turnIndex, workspacePath, turn.cwd);
                 if (change)
                     turn.codeChanges.push(change);
             }
@@ -763,7 +922,7 @@ export async function captureLatestClaudeTurnSnapshots(options = {}) {
         }
         if (entry.type === "assistant") {
             const message = record(entry.message);
-            attachAssistantBlocks(current, entry);
+            await attachAssistantBlocks(current, entry, options.workspacePath);
             current.endOffset = lineEndOffset;
             const text = assistantTextFromEntry(entry);
             const at = isoTimestamp(entry.timestamp);

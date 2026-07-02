@@ -21,16 +21,18 @@ class PluginClient(Base):
     plugin_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    user_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     user_display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     team: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     machine_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     host_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     __table_args__ = (
         Index("ix_plugin_clients_last_seen", "last_seen_at"),
+        Index("ix_plugin_clients_identity_host", "tool", "plugin_name", "user_id", "host_hash"),
+        Index("ix_plugin_clients_identity_machine", "tool", "plugin_name", "user_id", "machine_id"),
     )
 
 
@@ -44,7 +46,6 @@ class PluginHeartbeat(Base):
     tool: Mapped[str] = mapped_column(String(32), nullable=False)
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    user_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     user_display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     team: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     machine_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -76,7 +77,6 @@ class RawIngestEvent(Base):
     source_confidence: Mapped[str] = mapped_column(String(24), nullable=False)
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    user_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     user_display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     team: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     machine_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -186,7 +186,6 @@ class AiSession(Base):
     title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    user_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     user_display_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     team: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     machine_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
@@ -243,8 +242,14 @@ class AiMessage(Base):
     turn_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[Optional[str]] = mapped_column(LONGTEXT, nullable=True)
+    content_storage: Mapped[str] = mapped_column(String(24), nullable=False, default="inline")
     text_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     text_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    blob_ref: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    blob_encoding: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    blob_original_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    blob_compressed_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    blob_sha256: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     raw_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     raw_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     source_key: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)

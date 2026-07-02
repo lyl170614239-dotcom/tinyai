@@ -44,9 +44,37 @@ function terminalWriteSignal(text) {
 function isTerminalTool(toolName) {
     return /(bash|shell|terminal|run_command|run_in_terminal)/.test(toolName);
 }
+function isDirectEditTool(toolName) {
+    return /(replace_string_in_file|create_file|edit_file|write_file|insert_edit)/.test(toolName);
+}
+function collectClaudeToolPathArguments(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return [];
+    const record = value;
+    const output = new Set();
+    for (const key of ["file_path", "filePath", "path", "relative_path", "absolute_path", "target_path"]) {
+        const candidate = record[key];
+        if (typeof candidate !== "string")
+            continue;
+        const cleaned = cleanPathCandidate(candidate);
+        if (cleaned)
+            output.add(cleaned);
+    }
+    return [...output].slice(0, 20);
+}
+function hasClaudeToolPatchPath(snapshot) {
+    return (snapshot.code_changes || []).some((change) => {
+        const filePath = typeof change.file_path === "string" ? cleanPathCandidate(change.file_path) : undefined;
+        return Boolean(filePath);
+    });
+}
 export function hasClaudeExternalWriteSignal(snapshot) {
+    if (hasClaudeToolPatchPath(snapshot))
+        return true;
     for (const toolCall of snapshot.tool_calls || []) {
         const name = String(toolCall.tool_name || toolCall.name || "").toLowerCase();
+        if (isDirectEditTool(name))
+            return true;
         if (!isTerminalTool(name))
             continue;
         const command = textFromUnknown(toolCall.arguments_raw).toLowerCase();
@@ -64,6 +92,11 @@ export function claudeWorkspaceDiffPathCandidates(snapshot) {
     }
     for (const toolCall of snapshot.tool_calls || []) {
         const name = String(toolCall.tool_name || toolCall.name || "").toLowerCase();
+        if (isDirectEditTool(name)) {
+            for (const path of collectClaudeToolPathArguments(toolCall.arguments_raw))
+                paths.add(path);
+            continue;
+        }
         if (!isTerminalTool(name))
             continue;
         const command = textFromUnknown(toolCall.arguments_raw).toLowerCase();

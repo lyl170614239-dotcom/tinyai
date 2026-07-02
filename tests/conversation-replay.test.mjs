@@ -7,8 +7,10 @@ import { resolve } from "node:path";
 
 import {
   captureLatestClaudeConversation,
-  captureLatestCodexConversation
+  captureLatestCodexConversation,
+  codexTerminalTurnSnapshots
 } from "../plugin-runtime/dist/conversation.js";
+import { codexTurnSnapshotPayload } from "../plugin-runtime/dist/codex-turn.js";
 
 test("Claude replay removes tool-only and duplicate entries but preserves repeated prompts in separate turns", async () => {
   const snapshot = await captureLatestClaudeConversation({
@@ -77,6 +79,268 @@ test("Codex replay derives code edits from apply_patch input", async () => {
   assert.equal(snapshot.code_edits?.[0]?.lines_added, 3);
   assert.equal(snapshot.code_edits?.[0]?.lines_deleted, 0);
   assert.equal(snapshot.code_edits?.[0]?.hunks[0]?.lines[0]?.text, "# 刘芸隆的开心故事");
+});
+
+test("Codex replay resolves relative apply_patch additions to absolute file lines", async () => {
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-absolute-patch-`);
+  const filePath = `${dir}/刘芸隆.md`;
+  const prefix = Array.from({ length: 42 }, (_, index) => `前文第 ${index + 1} 行`);
+  const added = [
+    "又有一载，北境烽烟骤起，黑云压城，万骑踏雪而来。",
+    "",
+    "话音未落，他纵身跃下城头，足踏飞雪，刀锋横开三丈银芒。",
+    "",
+    "壮哉刘芸隆！侠骨仁心，光照四方。"
+  ];
+  await writeFile(filePath, `${[...prefix, ...added].join("\n")}\n`, "utf8");
+
+  const sessionFile = `${dir}/codex-session.jsonl`;
+  await writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session_meta", timestamp: "2026-07-02T10:00:00.000Z", payload: { id: "codex-absolute-patch-session", cwd: dir } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T10:00:01.000Z", payload: { type: "user_message", id: "u-1", message: "添加更燃剧情" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T10:00:02.000Z", payload: { type: "task_started" } }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-07-02T10:00:03.000Z",
+        payload: {
+          type: "custom_tool_call",
+          status: "completed",
+          call_id: "call-apply",
+          name: "apply_patch",
+          input: `*** Begin Patch\n*** Update File: 刘芸隆.md\n@@\n+${added.join("\n+")}\n*** End Patch\n`
+        }
+      }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T10:00:04.000Z", payload: { type: "agent_message", id: "a-1", message: "已添加。" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T10:00:05.000Z", payload: { type: "task_complete" } })
+    ].join("\n") + "\n",
+    "utf8"
+  );
+
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    latestTurnOnly: true,
+    sessionFile
+  });
+
+  const change = snapshot.code_edits?.[0];
+  assert.equal(change?.line_number_basis, "absolute");
+  assert.equal(change?.hunks[0]?.new_start, 43);
+  assert.deepEqual(change?.hunks[0]?.lines.map((line) => line.new_line), [43, 44, 45, 46, 47]);
+});
+
+test("Codex replay resolves relative apply_patch replacements to absolute file lines", async () => {
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-absolute-replace-`);
+  const filePath = `${dir}/刘芸隆.md`;
+  const prefix = Array.from({ length: 42 }, (_, index) => `前文第 ${index + 1} 行`);
+  await writeFile(filePath, `${[...prefix, "新句子：刀光照彻北境。", "后文仍在。"].join("\n")}\n`, "utf8");
+
+  const sessionFile = `${dir}/codex-session.jsonl`;
+  await writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session_meta", timestamp: "2026-07-02T11:00:00.000Z", payload: { id: "codex-absolute-replace-session", cwd: dir } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T11:00:01.000Z", payload: { type: "user_message", id: "u-1", message: "替换一句话" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T11:00:02.000Z", payload: { type: "task_started" } }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-07-02T11:00:03.000Z",
+        payload: {
+          type: "custom_tool_call",
+          status: "completed",
+          call_id: "call-apply",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** Update File: 刘芸隆.md\n@@\n-旧句子：风雪压城。\n+新句子：刀光照彻北境。\n 后文仍在。\n*** End Patch\n"
+        }
+      }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T11:00:04.000Z", payload: { type: "agent_message", id: "a-1", message: "已替换。" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-02T11:00:05.000Z", payload: { type: "task_complete" } })
+    ].join("\n") + "\n",
+    "utf8"
+  );
+
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    latestTurnOnly: true,
+    sessionFile
+  });
+
+  const change = snapshot.code_edits?.[0];
+  assert.equal(change?.line_number_basis, "absolute");
+  assert.equal(change?.hunks[0]?.new_start, 43);
+  assert.equal(change?.hunks[0]?.old_start, 43);
+  assert.equal(change?.hunks[0]?.lines.find((line) => line.line_type === "removed")?.old_line, 43);
+  assert.equal(change?.hunks[0]?.lines.find((line) => line.line_type === "added")?.new_line, 43);
+});
+
+test("Codex replay treats an interrupted latest turn as a terminal failed turn", async () => {
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-aborted-`);
+  const sessionFile = `${dir}/rollout-2026-07-01T21-37-57-019f1de6-8ef7-7731-b6b8-73806603e942.jsonl`;
+  await writeFile(
+    sessionFile,
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: "codex-aborted-session", cwd: "/tmp/project" } }),
+      JSON.stringify({
+        timestamp: "2026-07-01T13:43:05.290Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-aborted" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T13:43:05.373Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "看看系统架构\n" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T13:43:13.803Z",
+        type: "event_msg",
+        payload: { type: "agent_message", phase: "commentary", message: "我会用 analyze-with-file 来做这次架构梳理。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T13:43:19.701Z",
+        type: "event_msg",
+        payload: { type: "agent_message", phase: "commentary", message: "先把入口、插件、后端、前端和测试线索跑一遍。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T13:43:20.955Z",
+        type: "event_msg",
+        payload: { type: "turn_aborted", turn_id: "turn-aborted", duration_ms: 15671 }
+      })
+    ].join("\n") + "\n",
+    "utf8"
+  );
+
+  const snapshot = await captureLatestCodexConversation({
+    includeText: true,
+    latestTurnOnly: true,
+    sessionFile
+  });
+  const payload = codexTurnSnapshotPayload(snapshot);
+
+  assert.equal(snapshot.latest_turn_complete, false);
+  assert.equal(snapshot.latest_turn_aborted, true);
+  assert.equal(snapshot.latest_turn_terminal, true);
+  assert.equal(snapshot.turn_aborted_count, 1);
+  assert.deepEqual(snapshot.messages.map((message) => [message.turn_index, message.role, message.text]), [
+    [1, "user", "看看系统架构\n"],
+    [1, "assistant", "先把入口、插件、后端、前端和测试线索跑一遍。"]
+  ]);
+  assert.equal(snapshot.process_steps?.[0]?.kind, "assistant_progress");
+  assert.equal(payload.turn.status, "failed");
+  assert.equal(payload.turn.interrupted, true);
+  assert.equal(payload.turn.finish_reason, "user_interrupted");
+});
+
+test("Codex incremental replay splits an aborted turn before a later completed turn", async () => {
+  const previousCursorDir = process.env.TINYAI_OBS_CURSOR_DIR;
+  const dir = await mkdtemp(`${tmpdir()}/tinyai-codex-aborted-window-`);
+  process.env.TINYAI_OBS_CURSOR_DIR = dir;
+  try {
+    const sessionFile = `${dir}/rollout-2026-07-01T22-08-36-019f1e02-a18a-7ba0-94f1-fe56e1c0f779.jsonl`;
+    const prefix = [
+      JSON.stringify({ type: "session_meta", payload: { id: "codex-window-session", cwd: "/tmp/project" } }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:08:40.353Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-1" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:08:44.418Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "你好\n" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:09:05.671Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "你好！我在这儿。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:09:06.026Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-1", duration_ms: 25776 }
+      })
+    ].join("\n") + "\n";
+    const suffix = [
+      JSON.stringify({
+        timestamp: "2026-07-01T14:11:58.937Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-2" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:11:59.086Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "分析系统架构\n" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:12:10.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "我会先检查最近 workflow 和仓库入口。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:12:20.797Z",
+        type: "event_msg",
+        payload: { type: "turn_aborted", turn_id: "turn-2", reason: "interrupted", duration_ms: 21861 }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:13:32.749Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-3" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:13:32.778Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "你好\n" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:13:38.267Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "你好，我在。刚才那次架构分析被你中断了。" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-01T14:13:38.368Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-3", duration_ms: 5625 }
+      })
+    ].join("\n") + "\n";
+    await writeFile(sessionFile, prefix + suffix, "utf8");
+    const cursorOffset = Buffer.byteLength(prefix, "utf8");
+    const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 32);
+    await writeFile(
+      `${dir}/codex-conversation-cursors.json`,
+      JSON.stringify({
+        [key]: {
+          file_path: sessionFile,
+          file_size: cursorOffset,
+          read_offset: cursorOffset,
+          updated_at: "2026-07-01T14:09:06.026Z",
+          session_id: "codex-window-session",
+          user_message_count: 1
+        }
+      }),
+      "utf8"
+    );
+
+    const snapshot = await captureLatestCodexConversation({
+      includeText: true,
+      latestTurnOnly: false,
+      sessionFile
+    });
+    const turnSnapshots = codexTerminalTurnSnapshots(snapshot);
+    const payloads = turnSnapshots.map((turnSnapshot) => codexTurnSnapshotPayload(turnSnapshot));
+
+    assert.equal(snapshot.user_message_count, 2);
+    assert.equal(snapshot.turn_index_offset, 1);
+    assert.equal(turnSnapshots.length, 2);
+    assert.deepEqual(payloads.map((payload) => [payload.turn.turn_index, payload.turn.status, payload.user_message.text]), [
+      [2, "failed", "分析系统架构\n"],
+      [3, "completed", "你好\n"]
+    ]);
+    assert.equal(payloads[0].turn.interrupted, true);
+    assert.equal(payloads[0].turn.finish_reason, "user_interrupted");
+  } finally {
+    if (previousCursorDir === undefined) delete process.env.TINYAI_OBS_CURSOR_DIR;
+    else process.env.TINYAI_OBS_CURSOR_DIR = previousCursorDir;
+  }
 });
 
 test("Codex replay recovers latest turn context when cursor starts after the user message", async () => {

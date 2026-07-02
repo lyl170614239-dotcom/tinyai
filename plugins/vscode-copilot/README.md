@@ -18,7 +18,7 @@ npm run configure -- \
 6. In Agent mode, enable or allow the `tinyai_specs` tool. Copilot can then call the tool directly when the prompt needs personal specs.
 7. For sticky TinyAI chat, start a Copilot Chat thread with `@tinyai`; the participant is sticky, so follow-up turns in that thread do not need `@tinyai` again.
 8. Open the left-side `TinyAI` activity bar item only when you need setup or verification: `Open Dashboard`, `Configure User & Collector`, `Install Git Hooks`, or manual capture/flush actions.
-9. Click `Install Git Hooks` once per repository when you want commit/push AI code attribution to run automatically.
+9. Click `Install Git Hooks` once per repository when you want commit AI code attribution to run automatically.
 
 Automatic Copilot capture emits one `turn_snapshot` per completed request.
 The user question and final assistant answer come from `chatSessions`; visible
@@ -29,16 +29,16 @@ extension no longer uploads automatic Copilot `agent_activity`, standalone
 still keep their lifecycle events.
 
 The extension also records spec/catalog access, code change summaries,
-feedback, commit/push attribution snapshots, and upload retries.
+feedback, commit attribution snapshots, and upload retries.
 Every event includes the configured `tinyaiObservability.userName` so all
 sessions from the same teammate group under one user in the dashboard.
-For AI code metrics, `git commit` records a `commit_snapshot` and `git push`
-records a `push_snapshot` after hooks are installed. The collector compares the
-commit diff against prior Copilot/Claude AI code evidence in the database to
+For AI code metrics, `git commit` records a `commit_snapshot` after hooks are
+installed. The collector compares the commit diff against prior
+Copilot/Claude AI code evidence in the database to
 classify AI-current, human-current, and AI-assisted human-edited lines. Users do
 not need to click a manual "mark current diff" button. Snapshot events use
-stable IDs based on the commit SHA or push range, so repeated runs do not double
-count the same code.
+stable IDs based on the commit SHA, so repeated runs do not double count the
+same code.
 
 Regular Copilot Chat is captured from local VS Code workspace transcript files:
 

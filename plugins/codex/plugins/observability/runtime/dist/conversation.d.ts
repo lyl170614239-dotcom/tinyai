@@ -34,7 +34,7 @@ type FileReadRecord = {
     sequence?: number;
 };
 type HunkLine = {
-    line_type: "added" | "removed";
+    line_type: "added" | "removed" | "context";
     old_line?: number;
     new_line?: number;
     text: string;
@@ -51,6 +51,7 @@ type CodeEditRecord = {
     file_path: string;
     lines_added: number;
     lines_deleted: number;
+    line_number_basis?: "absolute" | "relative";
     hunks: CodeEditHunk[];
     occurred_at?: string;
     sequence?: number;
@@ -124,11 +125,14 @@ export interface ConversationSnapshot {
     model?: string;
     resolved_model?: string;
     latest_turn_complete?: boolean;
+    latest_turn_aborted?: boolean;
+    latest_turn_terminal?: boolean;
     turn_index_offset?: number;
     capture_cursor?: CaptureCursorMetadata;
 }
 export declare function commitConversationCursor(snapshot: ConversationSnapshot): Promise<boolean>;
 export declare function latestCodexTurnSnapshot(snapshot: ConversationSnapshot): ConversationSnapshot;
+export declare function codexTerminalTurnSnapshots(snapshot: ConversationSnapshot): ConversationSnapshot[];
 export declare function captureLatestCodexConversation(options?: {
     includeText?: boolean;
     sessionFile?: string;

@@ -42,11 +42,9 @@ type MetricsResponse = {
     project_spec_related_adoption_doc_count?: number;
     code_snapshot_count: number;
     commit_snapshot_count?: number;
-    push_snapshot_count?: number;
     ai_committed_lines?: number;
     ai_generated_added_lines?: number;
     ai_commit_current_added_lines?: number;
-    ai_pushed_lines?: number;
     pr_attribution_count?: number;
     pr_ai_lines?: number;
     pr_total_lines?: number;
@@ -76,7 +74,6 @@ type AiSessionSummary = {
   model: string | null;
   username: string | null;
   user_id: string | null;
-  user_email: string | null;
   user_display_name: string | null;
   team: string | null;
   started_at: string | null;
@@ -89,12 +86,37 @@ type AiMessage = {
   turn_index: number;
   role: string;
   content: string | null;
+  content_storage?: string | null;
   text_len: number;
   text_hash: string | null;
+  blob_ref?: string | null;
+  blob_encoding?: string | null;
+  blob_original_bytes?: number | null;
+  blob_compressed_bytes?: number | null;
+  blob_sha256?: string | null;
   raw_event_id?: string | null;
   raw_path?: string | null;
   source_key?: string | null;
   occurred_at: string;
+};
+
+type RawEventBlobResponse = {
+  raw_event_id: string;
+  blob_key: string;
+  encoding: string;
+  value_type?: string | null;
+  sha256: string;
+  original_bytes: number;
+  compressed_bytes: number;
+  content: string;
+};
+
+type CodeChangeRawDetailResponse = {
+  code_change_id: number;
+  event_id?: string | null;
+  source: string;
+  blob_count: number;
+  code_change: Record<string, unknown>;
 };
 
 type AiProcessStep = {
@@ -225,10 +247,10 @@ type PluginClient = {
   plugin_version: string | null;
   username: string | null;
   user_id: string | null;
-  user_email: string | null;
   user_display_name: string | null;
   team: string | null;
   machine_id: string | null;
+  model: string | null;
   last_seen_at: string;
 };
 
@@ -265,13 +287,18 @@ async function apiFetch(path: string, init?: RequestInit) {
   let lastError: unknown;
   for (const base of apiBases) {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 2500);
+    const timeoutMs = Math.max(2500, Number(import.meta.env.VITE_OBS_API_TIMEOUT_MS || 10000) || 10000);
+    let didTimeout = false;
+    const timeout = window.setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+    }, timeoutMs);
     try {
       const response = await fetch(`${base}${path}`, { ...init, signal: controller.signal });
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       return response;
     } catch (error) {
-      lastError = error;
+      lastError = didTimeout ? new Error(`collector request timed out after ${timeoutMs}ms`) : error;
     } finally {
       window.clearTimeout(timeout);
     }
@@ -450,24 +477,24 @@ function confidenceTone(c: string): "good" | "warn" | "bad" | "default" {
 }
 
 function identityLabel(item: Partial<AiSessionSummary>) {
-  if (item.user_display_name && item.user_email) return `${item.user_display_name} <${item.user_email}>`;
-  return item.user_display_name || item.user_email || item.user_id || item.username || "";
+  return item.user_display_name || item.user_id || item.username || "";
 }
 
-function personName(item: { user_display_name?: string | null; username?: string | null; user_email?: string | null; user_id?: string | null }) {
+function personName(item: { user_display_name?: string | null; username?: string | null; user_id?: string | null }) {
   if (item.user_display_name) return item.user_display_name;
   if (item.username && item.username !== "unknown" && item.username !== "user") return item.username;
-  const email = item.user_email || item.user_id || "";
-  return email.includes("@") ? email.split("@")[0] : "未知用户";
+  return item.user_id || "未知用户";
 }
 
-function personEmail(item: { user_email?: string | null; user_id?: string | null }) {
-  const email = item.user_email || item.user_id || "";
-  return email.includes("@") ? email : "未配置邮箱";
+function personIdentityNote(item: { user_id?: string | null; team?: string | null }) {
+  if (item.team && item.user_id) return `${item.team} · ${item.user_id}`;
+  if (item.team) return item.team;
+  if (item.user_id) return `ID ${item.user_id}`;
+  return "未配置用户 ID";
 }
 
 function pluginPersonKey(client: PluginClient) {
-  return (client.user_email || client.user_id || client.user_display_name || client.username || client.client_id || "unknown").trim().toLowerCase();
+  return (client.user_id || client.user_display_name || client.username || client.client_id || "unknown").trim().toLowerCase();
 }
 
 function latestClient(clients: PluginClient[]) {
@@ -528,13 +555,24 @@ function pluginDisplayName(client: PluginClient) {
   return client.plugin_name || client.tool || "未知插件";
 }
 
+function toolDisplayName(tool: string | null | undefined) {
+  const value = String(tool || "").toLowerCase();
+  const labels: Record<string, string> = {
+    copilot: "Copilot",
+    claude: "Claude",
+    codex: "Codex",
+    git: "Git commit",
+  };
+  return labels[value] || tool || "未知工具";
+}
+
 function pluginGroupStatus(group: PluginClientGroup) {
   return minutesSince(group.last_seen_at) <= 30 ? "online" : "offline";
 }
 
 function pluginGroupFilterValue(group: PluginClientGroup) {
   const client = group.representative;
-  return client.username || client.user_id || client.user_email || client.user_display_name || "";
+  return client.username || client.user_id || client.user_display_name || "";
 }
 
 function PluginLoginPanel({
@@ -576,12 +614,12 @@ function PluginLoginPanel({
               <span className={`plugin-login-dot ${online ? "online" : "offline"}`} />
               <span className="plugin-login-main">
                 <strong>{personName(client)}</strong>
-                <small>{personEmail(client)}</small>
+                <small>{personIdentityNote(client)}</small>
               </span>
               <span className="plugin-login-meta">
                 <span>{pluginDisplayName(client)}</span>
                 <small>
-                  {group.tools.join(" / ") || client.tool || "未知工具"}
+                  {group.tools.map(toolDisplayName).join(" / ") || toolDisplayName(client.tool)}
                   {group.plugin_versions.length ? ` · v${group.plugin_versions.join(" / v")}` : ""}
                 </small>
                 <small>{online ? "在线" : "离线"} · {fmtTime(group.last_seen_at)}</small>
@@ -633,17 +671,58 @@ function SummaryCard({
   value,
   hint,
   tone = "default",
+  className = "",
 }: {
   label: string;
   value: React.ReactNode;
   hint?: string;
   tone?: "default" | "primary" | "success" | "warning" | "danger";
+  className?: string;
 }) {
   return (
-    <div className={`card card-${tone}`}>
+    <div className={`card card-${tone} ${className}`.trim()}>
       <div className="card-label">{label}</div>
       <div className="card-value">{value}</div>
       {hint && <div className="card-hint">{hint}</div>}
+    </div>
+  );
+}
+
+function AttributionSummaryCard({
+  label,
+  note,
+  parts,
+  total,
+  hint,
+  tone = "default",
+}: {
+  label: string;
+  note?: string;
+  parts?: Array<{ label: string; value: React.ReactNode; tone?: "add" | "remove" | "edit" }>;
+  total?: React.ReactNode;
+  hint?: string;
+  tone?: "default" | "primary" | "success" | "warning" | "danger";
+}) {
+  return (
+    <div className={`card card-${tone} attribution-card`}>
+      <div className="attribution-card-head">
+        <div>
+          <div className="attribution-title">{label}</div>
+          {note && <div className="attribution-note">{note}</div>}
+        </div>
+      </div>
+      {total !== undefined && <div className="attribution-total">{total}</div>}
+      {parts && parts.length > 0 && (
+        <div className="attribution-parts">
+          {parts.map((part) => (
+            <div className={`attribution-part attribution-part-${part.tone || "default"}`} key={part.label}>
+              <span>{part.label}</span>
+              <strong>{part.value}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+      {hint && <div className="attribution-hint">{hint}</div>}
     </div>
   );
 }
@@ -674,6 +753,27 @@ function messageMissingContentSummary(message: AiMessage) {
   if (message.text_len > 0) parts.push(`${fmtNumber(message.text_len)} 字符`);
   if (message.text_hash) parts.push(`hash ${message.text_hash.slice(0, 12)}`);
   return parts.length ? parts.join(" · ") : "正文未入库";
+}
+
+function isBlobPreviewMessage(message: AiMessage) {
+  return message.content_storage === "blob_preview" && Boolean(message.raw_event_id && message.blob_ref);
+}
+
+function messageBlobSummary(message: AiMessage) {
+  const parts: string[] = [];
+  if (message.text_len > 0) parts.push(`原文 ${fmtNumber(message.text_len)} 字`);
+  if (message.blob_original_bytes) parts.push(`${fmtNumber(message.blob_original_bytes)} bytes`);
+  if (message.blob_compressed_bytes) parts.push(`压缩 ${fmtNumber(message.blob_compressed_bytes)} bytes`);
+  return parts.join(" · ");
+}
+
+async function fetchMessageBlob(message: AiMessage) {
+  if (!message.raw_event_id || !message.blob_ref) throw new Error("missing blob reference");
+  const res = await apiFetch(
+    `/api/v1/raw-events/${encodeURIComponent(message.raw_event_id)}/blobs/${encodeURIComponent(message.blob_ref)}`
+  );
+  const body = (await res.json()) as RawEventBlobResponse;
+  return body.content || "";
 }
 
 function messageLineCount(content: string) {
@@ -843,11 +943,36 @@ function TurnMessageBlock({
   role: "user" | "assistant";
   label: string;
 }) {
+  const [fullContent, setFullContent] = useState<string>("");
+  const [fullOpen, setFullOpen] = useState(false);
+  const [blobLoading, setBlobLoading] = useState(false);
+  const [blobError, setBlobError] = useState("");
   const content = messageContent(message);
   const hasInlineContent = hasMessageContent(message);
+  const blobPreview = isBlobPreviewMessage(message);
   if (!content && !message.text_len && !message.text_hash) return null;
   const collapsible = shouldCollapseMessage(content, role);
   const lines = messageLineCount(content);
+  async function toggleFullBlob() {
+    if (fullOpen) {
+      setFullOpen(false);
+      return;
+    }
+    setBlobError("");
+    if (!fullContent) {
+      setBlobLoading(true);
+      try {
+        const nextContent = await fetchMessageBlob(message);
+        setFullContent(nextContent);
+      } catch (error) {
+        setBlobError(error instanceof Error ? error.message : String(error));
+        return;
+      } finally {
+        setBlobLoading(false);
+      }
+    }
+    setFullOpen(true);
+  }
   if (!hasInlineContent) {
     return (
       <div className={`turn-message turn-${role} turn-message-missing`} key={message.id}>
@@ -858,6 +983,29 @@ function TurnMessageBlock({
         <div className="missing-message-note">
           这条历史消息没有正文内容，只采集到了长度和 hash；无法生成正文预览。新采集到的长文本会在这里显示摘要，完整原文仍按原始事件/Blob 策略保存。
         </div>
+      </div>
+    );
+  }
+  if (blobPreview) {
+    return (
+      <div className={`turn-message turn-${role} turn-message-blob`} key={message.id}>
+        <div className="turn-message-head">
+          <div className="turn-role">{label}</div>
+          <span className="message-size">{messageBlobSummary(message)}</span>
+        </div>
+        <div className="turn-content">{content}</div>
+        <div className="message-blob-actions">
+          <button className="btn btn-compact" type="button" onClick={toggleFullBlob} disabled={blobLoading}>
+            {blobLoading ? "加载中..." : fullOpen ? "收起完整内容" : "查看完整内容"}
+          </button>
+          {message.blob_ref && <span className="message-blob-ref">{message.blob_ref}</span>}
+          {blobError && <span className="message-blob-error">{blobError}</span>}
+        </div>
+        {fullOpen && fullContent && (
+          <div className="message-blob-full">
+            <div className="turn-content message-full">{fullContent}</div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1029,6 +1177,14 @@ function isAiEvidenceCodeChange(change: AiCodeChange) {
     || kind.includes("tool_patch")
     || kind.includes("tool_edit")
   );
+}
+
+function aiEvidenceDefaultAttribution(change: AiCodeChange) {
+  if (isCommitCodeChange(change) || !isAiEvidenceCodeChange(change)) return {};
+  return {
+    defaultAddedClassification: "ai_current",
+    defaultRemovedClassification: "ai_evidence_removed",
+  };
 }
 
 function splitCodeChanges(changes: AiCodeChange[]) {
@@ -1371,9 +1527,12 @@ function CommitAttributionDiffView({ change }: { change: AiCodeChange }) {
       {displayHunks.length > 0 ? (
         displayHunks.map((hunk, index) => <HunkView hunk={hunk} index={index} splitRemoved key={`commit-hunk-${index}`} />)
       ) : attributionTruncated ? (
-        <div className="diff-empty">
-          这个提交超过 {fmtNumber(attributionLimit)} 行阈值，行级证据已摘要化。完整提交 diff 可通过 blob 详情接口按需读取。
-        </div>
+        <>
+          <div className="diff-empty">
+            这个提交超过 {fmtNumber(attributionLimit)} 行阈值，行级证据已摘要化。完整提交 diff 可通过 blob 详情接口按需读取。
+          </div>
+          <RawCodeChangeDetail change={change} />
+        </>
       ) : (
         <div className="diff-empty">这个提交没有匹配到 AI 行证据，按人工当前计入；判定原因是未命中 AI 证据。</div>
       )}
@@ -1381,9 +1540,18 @@ function CommitAttributionDiffView({ change }: { change: AiCodeChange }) {
   );
 }
 
-function AddedLinesView({ changeRecord, defaultAddedClassification }: { changeRecord: Record<string, unknown>; defaultAddedClassification?: string }) {
+function AddedLinesView({
+  changeRecord,
+  defaultAddedClassification,
+  defaultRemovedClassification,
+}: {
+  changeRecord: Record<string, unknown>;
+  defaultAddedClassification?: string;
+  defaultRemovedClassification?: string;
+}) {
   const addedLines = asArray(changeRecord.added_lines).map(asRecord).filter(Boolean) as Record<string, unknown>[];
   const removedCount = Number(changeRecord.removed_line_count || 0);
+  const removedAttribution = attributionLabel(defaultRemovedClassification);
   if (addedLines.length === 0 && removedCount === 0) return null;
   return (
     <div className="diff-hunk">
@@ -1397,7 +1565,190 @@ function AddedLinesView({ changeRecord, defaultAddedClassification }: { changeRe
         <div className="diff-line diff-removed">
           <span className="diff-sign">-</span>
           <span className="diff-line-no">?</span>
+          {removedAttribution && (
+            <span className={`diff-attribution diff-attribution-${defaultRemovedClassification}`}>
+              {removedAttribution}
+            </span>
+          )}
           <code>删除了 {removedCount} 行，删除内容未采集</code>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function lineRangeText(start: number, count: number) {
+  if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return "";
+  const end = start + count - 1;
+  return start === end ? fmtNumber(start) : `${fmtNumber(start)}-${fmtNumber(end)}`;
+}
+
+function compactLineRanges(ranges: string[]) {
+  if (ranges.length <= 2) return ranges.join("、");
+  return `${ranges.slice(0, 2).join("、")} 等 ${fmtNumber(ranges.length)} 段`;
+}
+
+function uniqueNumbers(values: number[]) {
+  return Array.from(new Set(values.filter((value) => Number.isFinite(value) && value > 0))).sort((left, right) => left - right);
+}
+
+function compactNumberRanges(values: number[]) {
+  const sorted = uniqueNumbers(values);
+  if (sorted.length === 0) return "";
+  const ranges: string[] = [];
+  let start = sorted[0];
+  let previous = sorted[0];
+  for (let index = 1; index < sorted.length; index += 1) {
+    const value = sorted[index];
+    if (value === previous + 1) {
+      previous = value;
+      continue;
+    }
+    ranges.push(start === previous ? fmtNumber(start) : `${fmtNumber(start)}-${fmtNumber(previous)}`);
+    start = value;
+    previous = value;
+  }
+  ranges.push(start === previous ? fmtNumber(start) : `${fmtNumber(start)}-${fmtNumber(previous)}`);
+  return compactLineRanges(ranges);
+}
+
+function hunkLineNumbers(hunks: Record<string, unknown>[], key: "new_line" | "old_line") {
+  const numbers: number[] = [];
+  hunks.forEach((hunk) => {
+    asArray(hunk.lines)
+      .map(asRecord)
+      .filter(Boolean)
+      .forEach((line) => {
+        const value = numericValue(line?.[key], 0);
+        if (value > 0) numbers.push(value);
+      });
+  });
+  return uniqueNumbers(numbers);
+}
+
+function hunkHeaderLineTotal(hunks: Record<string, unknown>[], key: "new_lines" | "old_lines") {
+  return hunks.reduce((total, hunk) => total + Math.max(0, numericValue(hunk[key], 0)), 0);
+}
+
+function hunkHeaderRanges(hunks: Record<string, unknown>[], startKey: "new_start" | "old_start", countKey: "new_lines" | "old_lines") {
+  return hunks
+    .map((hunk) => lineRangeText(numericValue(hunk[startKey], 0), numericValue(hunk[countKey], 0)))
+    .filter(Boolean);
+}
+
+function lineNumbersAreAbsolute(record: Record<string, unknown>) {
+  const stats = asRecord(record.line_stats);
+  const basis = String(record.line_number_basis || record.lineNumberBasis || stats?.line_number_basis || "").toLowerCase();
+  return basis === "absolute" || record.line_numbers_are_absolute === true || record.lineNumbersAreAbsolute === true;
+}
+
+function rawDetailLineSummary(change: AiCodeChange, changeRecord: Record<string, unknown>) {
+  const added = numericValue(changeRecord.lines_added, change.lines_added);
+  const deleted = numericValue(changeRecord.lines_deleted, change.lines_deleted);
+  const hunks = asArray(changeRecord.hunks)
+    .map(asRecord)
+    .filter(Boolean) as Record<string, unknown>[];
+  const newLineNumbers = hunkLineNumbers(hunks, "new_line");
+  const oldLineNumbers = hunkLineNumbers(hunks, "old_line");
+  const newLineTotal = newLineNumbers.length || hunkHeaderLineTotal(hunks, "new_lines");
+  const oldLineTotal = oldLineNumbers.length || hunkHeaderLineTotal(hunks, "old_lines");
+  const newRangeText = compactNumberRanges(newLineNumbers) || compactLineRanges(hunkHeaderRanges(hunks, "new_start", "new_lines"));
+  const oldRangeText = compactNumberRanges(oldLineNumbers) || compactLineRanges(hunkHeaderRanges(hunks, "old_start", "old_lines"));
+  const absolute = lineNumbersAreAbsolute(changeRecord);
+  const newLineLabel = absolute ? "新文件实际行数" : "新文件采集行数";
+  const oldLineLabel = absolute ? "旧文件实际行数" : "旧文件采集行数";
+  const lineLabel = absolute ? "实际行号" : "采集行号";
+  const parts = [`变更 +${fmtNumber(added)} -${fmtNumber(deleted)}`];
+  if (newLineTotal > 0) {
+    parts.push(`${newLineLabel} ${fmtNumber(newLineTotal)} 行${newRangeText ? `（${lineLabel} ${newRangeText}）` : ""}`);
+  }
+  if (oldLineTotal > 0) {
+    parts.push(`${oldLineLabel} ${fmtNumber(oldLineTotal)} 行${oldRangeText ? `（${lineLabel} ${oldRangeText}）` : ""}`);
+  }
+  if (newLineTotal === 0 && oldLineTotal === 0) {
+    parts.push(`${absolute ? "实际" : "采集"}新增 ${fmtNumber(added)} 行`);
+    if (deleted > 0) parts.push(`${absolute ? "实际" : "采集"}删除 ${fmtNumber(deleted)} 行`);
+  }
+  return parts.join(" · ");
+}
+
+function rawDetailCanRender(changeRecord: Record<string, unknown>) {
+  return asArray(changeRecord.hunks).length > 0 || asArray(changeRecord.changes).length > 0;
+}
+
+function RawCodeChangeDetail({ change }: { change: AiCodeChange }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<CodeChangeRawDetailResponse | null>(null);
+
+  async function toggleRawDetail() {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (detail || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/v1/code-changes/${change.id}/raw-detail`);
+      setDetail(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const rawChange = asRecord(detail?.code_change);
+  const hunks = asArray(rawChange?.hunks).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+  const editorChanges = asArray(rawChange?.changes).map(asRecord).filter(Boolean) as Record<string, unknown>[];
+  const renderable = rawChange ? rawDetailCanRender(rawChange) : false;
+  const lineSummary = rawChange ? rawDetailLineSummary(change, rawChange) : "";
+  const source = detail?.source ? String(detail.source) : "";
+  const blobCount = numericValue(detail?.blob_count, 0);
+  const defaultAttribution = aiEvidenceDefaultAttribution(change);
+
+  return (
+    <div className="raw-detail-panel">
+      <button className="btn btn-compact" type="button" onClick={toggleRawDetail} disabled={loading}>
+        {loading ? "加载完整详情..." : open ? "收起完整详情" : "查看完整详情"}
+      </button>
+      {open && (
+        <div className="raw-detail-body">
+          {error ? (
+            <div className="raw-detail-error">完整详情加载失败：{error}</div>
+          ) : loading ? (
+            <div className="raw-detail-muted">正在从 raw_event_blobs 还原完整代码证据...</div>
+          ) : detail && rawChange ? (
+            <>
+              <div className="raw-detail-meta">
+                来源 {source || "stored"} · Blob {fmtNumber(blobCount)} 个 · {lineSummary}
+              </div>
+              {renderable ? (
+                <>
+                  {hunks.map((hunk, index) => (
+                    <HunkView
+                      hunk={hunk}
+                      index={index}
+                      key={`raw-hunk-${change.id}-${index}`}
+                      {...defaultAttribution}
+                    />
+                  ))}
+                  {editorChanges.map((record, index) => (
+                    <AddedLinesView
+                      changeRecord={record}
+                      key={`raw-edit-${change.id}-${index}`}
+                      {...defaultAttribution}
+                    />
+                  ))}
+                </>
+              ) : (
+                <div className="raw-detail-muted">完整详情已还原，但没有可渲染的 hunk / editor delta 行。</div>
+              )}
+            </>
+          ) : null}
         </div>
       )}
     </div>
@@ -1412,40 +1763,38 @@ function CodeDiffView({ change }: { change: AiCodeChange }) {
   if (raw.line_detail_truncated || raw.line_detail_policy === "summary_only") {
     const summary = asRecord(raw.line_attribution_summary);
     const limit = numericValue(raw.line_detail_limit ?? summary?.full_line_attribution_limit, 5000);
+    const totalLines = Math.max(0, numericValue(change.lines_added, 0)) + Math.max(0, numericValue(change.lines_deleted, 0));
+    const reason =
+      totalLines > limit
+        ? `超过 ${fmtNumber(limit)} 行阈值`
+        : "详情体积较大";
     return (
       <div className="code-diff">
         <div className="diff-empty">
-          这条 AI 会话代码证据超过 {fmtNumber(limit)} 行阈值，行级详情已摘要化。新增 {fmtNumber(change.lines_added)} 行，删除 {fmtNumber(change.lines_deleted)} 行；提交全量 diff 以 commit_snapshot / raw_event_blobs 为准。
+          这条 AI 会话代码证据因{reason}，行级详情已摘要化。新增 {fmtNumber(change.lines_added)} 行，删除 {fmtNumber(change.lines_deleted)} 行；提交全量 diff 以 commit_snapshot / raw_event_blobs 为准。
         </div>
+        <RawCodeChangeDetail change={change} />
       </div>
     );
   }
   const hunks = asArray(raw.hunks).map(asRecord).filter(Boolean) as Record<string, unknown>[];
   const editorChanges = asArray(raw.changes).map(asRecord).filter(Boolean) as Record<string, unknown>[];
-  const isAiEvidence = isAiEvidenceCodeChange(change);
-  const defaultAddedClassification = isAiEvidence ? "ai_current" : undefined;
-  const defaultRemovedClassification = isAiEvidence ? "ai_evidence_removed" : undefined;
+  const defaultAttribution = aiEvidenceDefaultAttribution(change);
   if (hunks.length === 0 && editorChanges.length === 0) {
     return <div className="diff-empty">这条变更没有采集到具体代码行，只记录了文件和增删行数</div>;
   }
   return (
     <div className="code-diff">
-      {isAiEvidence && (
-        <div className="diff-empty ai-evidence-note">
-          这是 AI 会话代码证据：新增行默认标记为“AI 当前”，删除行标记为“AI 删除”。最终是否进入提交，以 commit 归因结果为准。
-        </div>
-      )}
       {hunks.map((hunk, index) => (
         <HunkView
           hunk={hunk}
           index={index}
           key={`hunk-${index}`}
-          defaultAddedClassification={defaultAddedClassification}
-          defaultRemovedClassification={defaultRemovedClassification}
+          {...defaultAttribution}
         />
       ))}
       {editorChanges.map((record, index) => (
-        <AddedLinesView changeRecord={record} defaultAddedClassification={defaultAddedClassification} key={`edit-${index}`} />
+        <AddedLinesView changeRecord={record} key={`edit-${index}`} {...defaultAttribution} />
       ))}
     </div>
   );
@@ -1535,7 +1884,7 @@ function CodeChangeGroups({ changes, compact = false }: { changes: AiCodeChange[
             <span>AI 生成证据</span>
             <Badge tone="blue">{aiEvidenceChanges.length}</Badge>
           </summary>
-          <p>插件采集到的 Copilot 生成/编辑证据，用于归因匹配；它不代表最终提交已经采纳。</p>
+          <p>插件采集到的 AI 工具生成/编辑证据，用于归因匹配；它不代表最终提交已经采纳。</p>
           <div className="turn-detail-body">
             {aiEvidenceChanges.map((change) => <CodeChangeSummary change={change} key={`ai-evidence-code-${change.id}`} />)}
           </div>
@@ -1918,7 +2267,13 @@ function MetricsContent({
           <SummaryCard label="活跃采集端" value={fmtNumber(activePluginCount)} hint="30 分钟内活跃" tone="success" />
           <SummaryCard label="平均耗时" value={fmtDuration(avgLatencyMs)} hint={`${summary?.request_usage_count ?? 0} 次请求`} />
           <SummaryCard label="工具调用" value={fmtNumber(toolCallCount)} hint="当前会话已归属工具调用" />
-          <SummaryCard label="Token / Copilot 消耗" value={fmtNumber(totalTokens(summary))} hint={fmtCredits(summary?.copilot_credits_total)} tone="warning" />
+          <SummaryCard
+            label="Token / Copilot 消耗"
+            value={fmtNumber(totalTokens(summary))}
+            hint={fmtCredits(summary?.copilot_credits_total)}
+            tone="warning"
+            className="card-wide card-long-number"
+          />
           <SummaryCard label="原始事件" value={summary?.event_count ?? 0} />
           <SummaryCard label="规范访问" value={summary?.spec_access_event_count ?? 0} />
         </div>
@@ -2185,9 +2540,32 @@ function CodeAttributionContent({
       <div className="metric-strip">
         <SummaryCard label="代码变更事件" value={summary?.code_snapshot_count ?? 0} />
         <SummaryCard label="Commit 数" value={fmtNumber(commitGroups.length)} hint={`${fmtNumber(commitTotals.files)} 个文件`} />
-        <SummaryCard label="AI 当前贡献" value={`+${fmtNumber(commitTotals.aiCurrentAdded)} -${fmtNumber(commitTotals.aiCurrentDeleted)} 改${fmtNumber(commitTotals.aiCurrentModified)}`} tone="primary" />
-        <SummaryCard label="人工当前（未命中 AI 证据）" value={`+${fmtNumber(commitTotals.humanCurrentAdded)} -${fmtNumber(commitTotals.humanCurrentDeleted)} 改${fmtNumber(commitTotals.humanCurrentModified)}`} />
-        <SummaryCard label="AI 辅助后人工改写" value={fmtNumber(assistedContribution)} hint={`+${fmtNumber(commitTotals.aiAssistedHumanEditedAdded)} · 改${fmtNumber(commitTotals.aiAssistedHumanEditedModified)}`} tone="warning" />
+        <AttributionSummaryCard
+          label="AI 当前贡献"
+          note="已命中 AI 证据"
+          tone="primary"
+          parts={[
+            { label: "新增", value: `+${fmtNumber(commitTotals.aiCurrentAdded)}`, tone: "add" },
+            { label: "删除", value: `-${fmtNumber(commitTotals.aiCurrentDeleted)}`, tone: "remove" },
+            { label: "改写", value: fmtNumber(commitTotals.aiCurrentModified), tone: "edit" },
+          ]}
+        />
+        <AttributionSummaryCard
+          label="人工当前"
+          note="未命中 AI 证据"
+          parts={[
+            { label: "新增", value: `+${fmtNumber(commitTotals.humanCurrentAdded)}`, tone: "add" },
+            { label: "删除", value: `-${fmtNumber(commitTotals.humanCurrentDeleted)}`, tone: "remove" },
+            { label: "改写", value: fmtNumber(commitTotals.humanCurrentModified), tone: "edit" },
+          ]}
+        />
+        <AttributionSummaryCard
+          label="AI 辅助后人工改写"
+          note="AI 生成后被人工调整"
+          total={fmtNumber(assistedContribution)}
+          hint={`新增 +${fmtNumber(commitTotals.aiAssistedHumanEditedAdded)} · 改写 ${fmtNumber(commitTotals.aiAssistedHumanEditedModified)}`}
+          tone="warning"
+        />
         <SummaryCard label="人工删除 AI 来源" value={fmtNumber(commitTotals.aiOriginDeletedByHuman)} />
         <SummaryCard label="AI 代码占比" value={aiRatio} hint={`${fmtNumber(commitTotals.evidence)} 条 AI 证据命中`} tone="success" />
       </div>
@@ -2330,7 +2708,7 @@ export default function App() {
   const navItems: Array<{ key: DashboardView; label: string; description: string; count?: number }> = [
     { key: "metrics", label: "指标总览", description: "全部监控指标", count: allMetrics(metrics).length },
     { key: "knowledge", label: "知识库指标", description: "覆盖/合规/命中", count: summary?.spec_access_event_count ?? 0 },
-    { key: "code", label: "代码归因指标", description: "采纳与提交/推送", count: summary?.code_snapshot_count ?? 0 },
+    { key: "code", label: "代码归因指标", description: "采纳与提交", count: summary?.code_snapshot_count ?? 0 },
     { key: "sessions", label: "会话证据", description: "对话和工具链路", count: sessions.length },
   ];
 

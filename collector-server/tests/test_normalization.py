@@ -330,6 +330,80 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["turns"][0]["status"], "failed")
         self.assertEqual(normalized["code_changes"], [])
 
+    def test_claude_turn_snapshot_keeps_completed_edit_with_failure_words_in_content(self):
+        payload = {
+            "session_id": "claude-session",
+            "request_id": "request-complete-edit",
+            "response_id": "response-complete-edit",
+            "turn": {
+                "turn_index": 1,
+                "request_id": "request-complete-edit",
+                "response_id": "response-complete-edit",
+                "status": "completed",
+            },
+            "messages": [
+                {"role": "user", "text": "酒店状态流转", "text_hash": "u"},
+                {"role": "assistant", "text": "已更新文档。", "text_hash": "a"},
+            ],
+            "tool_calls": [
+                {
+                    "tool_call_id": "call-edit-complete",
+                    "tool_name": "replace_string_in_file",
+                    "arguments_raw": {
+                        "file_path": "/Users/user/code/project/openspec/specs/domain-knowledge.md",
+                        "old_string": "旧内容",
+                        "new_string": "PaymentFail / ErrorCode 只是业务枚举，不代表工具失败",
+                    },
+                    "status": "complete",
+                    "result_raw": {
+                        "filePath": "/Users/user/code/project/openspec/specs/domain-knowledge.md",
+                        "newString": "PaymentFail / ErrorCode 只是业务枚举，不代表工具失败",
+                    },
+                }
+            ],
+            "process_steps": [
+                {
+                    "step_type": "tool_result",
+                    "tool_call_id": "call-edit-complete",
+                    "tool_name": "replace_string_in_file",
+                    "status": "complete",
+                    "text": "The file has been updated successfully.",
+                }
+            ],
+            "code_changes": [
+                {
+                    "snapshot_kind": "claude_turn_tool_patch",
+                    "file_path": "/Users/user/code/project/openspec/specs/domain-knowledge.md",
+                    "tool_call_id": "call-edit-complete",
+                    "tool_name": "replace_string_in_file",
+                    "lines_added": 1,
+                    "lines_deleted": 1,
+                    "hunks": [
+                        {
+                            "old_start": 1,
+                            "old_lines": 1,
+                            "new_start": 1,
+                            "new_lines": 1,
+                            "lines": [
+                                {"line_type": "removed", "old_line": 1, "text": "旧内容", "text_hash": "old"},
+                                {
+                                    "line_type": "added",
+                                    "new_line": 1,
+                                    "text": "PaymentFail / ErrorCode 只是业务枚举，不代表工具失败",
+                                    "text_hash": "new",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(len(normalized["code_changes"]), 1)
+        self.assertEqual(normalized["code_changes"][0]["snapshot_kind"], "claude_turn_tool_patch")
+
     def test_claude_turn_snapshot_cleans_agent_prompt_and_ide_context(self):
         agent_prompt = (
             "I need to understand the system architecture of the ai-observability project at "
@@ -407,7 +481,7 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["request_usage"], [])
         self.assertIn("claude subagent snapshot skipped", normalized["warnings"][0])
 
-    def test_turn_snapshot_derives_code_changes_from_apply_patch_tool_call(self):
+    def test_copilot_turn_snapshot_does_not_derive_code_changes_from_apply_patch_tool_call(self):
         patch = """*** Begin Patch
 *** Update File: /Users/user/code/ai-observability/collector-server/tests/hello.py
 @@
@@ -446,17 +520,111 @@ class NormalizationTests(unittest.TestCase):
             ],
         }
 
-        normalized = normalize_event(self.event(event_type="turn_snapshot"), payload)
+        normalized = normalize_event(self.event(tool="copilot", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(normalized["code_changes"], [])
+
+    def test_claude_turn_snapshot_still_derives_code_changes_from_apply_patch_tool_call(self):
+        patch = """*** Begin Patch
+*** Update File: /Users/user/code/ai-observability/collector-server/tests/hello.py
+@@
+ def run_all():
+     return {"hello": hello()}
++
++def molecular_weight(formula: str) -> float:
++    return 18.015
+*** End Patch"""
+        payload = {
+            "cwd": "/Users/user/code/ai-observability",
+            "session_id": "claude-session",
+            "request_id": "request-molecule",
+            "response_id": "response-molecule",
+            "turn": {
+                "turn_index": 9,
+                "request_id": "request-molecule",
+                "response_id": "response-molecule",
+                "started_at": "2026-06-24T10:00:01Z",
+                "completed_at": "2026-06-24T10:00:10Z",
+            },
+            "messages": [
+                {"role": "user", "text": "继续写代码，写一个分子计算的", "source_key": "request-molecule:user"},
+                {"role": "assistant", "text": "已添加分子量计算", "source_key": "request-molecule:response-molecule:assistant"},
+            ],
+            "tool_calls": [
+                {
+                    "tool_name": "apply_patch",
+                    "status": "complete",
+                    "tool_call_id": "call-patch",
+                    "request_id": "request-molecule",
+                    "response_id": "response-molecule",
+                    "completed_at": "2026-06-24T10:00:08Z",
+                    "arguments_raw": {"input": patch},
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="turn_snapshot"), payload)
         changes = normalized["code_changes"]
 
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0]["file_path"], "collector-server/tests/hello.py")
         self.assertEqual(changes[0]["request_id"], "request-molecule")
         self.assertEqual(changes[0]["turn_index"], 9)
-        self.assertEqual(changes[0]["snapshot_kind"], "copilot_turn_tool_patch")
+        self.assertEqual(changes[0]["snapshot_kind"], "claude_turn_tool_patch")
         self.assertGreaterEqual(changes[0]["lines_added"], 2)
         self.assertTrue(changes[0]["has_line_level_diff"])
         self.assertIn("molecular_weight", "\n".join(line["text"] for line in changes[0]["hunks"][0]["lines"]))
+
+    def test_code_change_preserves_absolute_line_number_basis(self):
+        payload = {
+            "snapshot_kind": "copilot_turn_workspace_diff",
+            "file_path": "src/example.py",
+            "line_number_basis": "absolute",
+            "lines_added": 1,
+            "lines_deleted": 0,
+            "hunks": [
+                {
+                    "old_start": 0,
+                    "old_lines": 0,
+                    "new_start": 42,
+                    "new_lines": 1,
+                    "lines": [{"line_type": "added", "new_line": 42, "text": "answer = 42", "text_hash": "h"}],
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(event_type="code_change"), payload)
+
+        self.assertEqual(normalized["code_changes"][0]["line_number_basis"], "absolute")
+        self.assertTrue(normalized["code_changes"][0]["line_numbers_are_absolute"])
+        self.assertEqual(normalized["code_changes"][0]["line_stats"]["line_number_basis"], "absolute")
+
+    def test_tool_replacement_derives_relative_line_number_basis(self):
+        payload = {
+            "session_id": "claude-session",
+            "request_id": "request-replace",
+            "response_id": "response-replace",
+            "turn": {"turn_index": 1, "request_id": "request-replace", "response_id": "response-replace"},
+            "messages": [{"role": "user", "text": "改代码"}, {"role": "assistant", "text": "已改"}],
+            "tool_calls": [
+                {
+                    "tool_call_id": "call-replace",
+                    "tool_name": "replace_string_in_file",
+                    "status": "complete",
+                    "arguments_raw": {
+                        "filePath": "src/example.py",
+                        "oldString": "old = True",
+                        "newString": "new = True",
+                    },
+                }
+            ],
+        }
+
+        normalized = normalize_event(self.event(tool="claude", event_type="turn_snapshot"), payload)
+
+        self.assertEqual(normalized["code_changes"][0]["line_number_basis"], "relative")
+        self.assertFalse(normalized["code_changes"][0]["line_numbers_are_absolute"])
+        self.assertEqual(normalized["code_changes"][0]["line_stats"]["line_number_basis"], "relative")
 
     def test_turn_snapshot_derives_spec_accesses_from_read_and_edit_tools(self):
         patch = """*** Begin Patch
@@ -506,14 +674,13 @@ class NormalizationTests(unittest.TestCase):
             ],
         }
 
-        normalized = normalize_event(self.event(event_type="turn_snapshot"), payload)
+        normalized = normalize_event(self.event(tool="copilot", event_type="turn_snapshot"), payload)
         spec_accesses = normalized["spec_accesses"]
 
         self.assertEqual(
             [(access["doc_path"], access["matched_by"][2]) for access in spec_accesses],
             [
                 ("openspec/specs/architecture.md", "access:read"),
-                ("openspec/specs/architecture.md", "access:edit"),
             ],
         )
         self.assertEqual(spec_accesses[0]["spec_scope"], "project")
@@ -522,7 +689,6 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(spec_accesses[0]["matched_doc_count"], 1)
         self.assertEqual(spec_accesses[0]["matched_docs"], ["openspec/specs/architecture.md"])
         self.assertIn("tool:read_file", spec_accesses[0]["matched_by"])
-        self.assertIn("code_change", spec_accesses[1]["matched_by"])
 
     def test_turn_snapshot_decodes_git_quoted_chinese_spec_path(self):
         payload = {

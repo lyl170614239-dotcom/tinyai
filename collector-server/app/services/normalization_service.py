@@ -20,7 +20,6 @@ PROJECT_SPEC_ABSOLUTE_ROOT = "/Users/user/code/java_code/jmapi_hotel_new/jmapi_h
 SPEC_READ_TOOLS = {"read_file"}
 SPEC_EDIT_TOOLS = {"replace_string_in_file", "create_file", "edit_file", "apply_patch"}
 SPEC_EDIT_SNAPSHOT_KINDS = {
-    "copilot_turn_tool_patch",
     "copilot_turn_editor_delta",
     "copilot_turn_workspace_diff",
     "claude_turn_tool_patch",
@@ -461,6 +460,19 @@ def _line_record(line_type: str, file_path: str, text: str, old_line: int | None
     return record
 
 
+def _line_number_basis(*records: dict[str, Any]) -> str | None:
+    for record in records:
+        for key in ("line_number_basis", "lineNumberBasis"):
+            value = record.get(key)
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"absolute", "relative", "unknown"}:
+                    return normalized
+        if record.get("line_numbers_are_absolute") is True or record.get("lineNumbersAreAbsolute") is True:
+            return "absolute"
+    return None
+
+
 def _code_change_from_replacement(raw: dict[str, Any], payload: dict[str, Any], source: str) -> dict[str, Any] | None:
     file_path = raw.get("filePath") or raw.get("file_path") or raw.get("path") or raw.get("file")
     old_string = raw.get("oldString") or raw.get("old_string")
@@ -510,6 +522,7 @@ def _code_change_from_replacement(raw: dict[str, Any], payload: dict[str, Any], 
         ],
         "source": source,
         "tool_name": raw.get("tool_name") or raw.get("name"),
+        "line_number_basis": "relative",
     }
     change["diff_hash"] = _hash_text(json.dumps(change, ensure_ascii=False, sort_keys=True))
     return change
@@ -544,6 +557,7 @@ def _code_changes_from_apply_patch(patch_text: Any, payload: dict[str, Any], sou
                 "lines_deleted": 0,
                 "source": source,
                 "tool_name": tool_name or "apply_patch",
+                "line_number_basis": "absolute" if operation.lower() == "add" else "relative",
                 "hunks": [],
             }
             old_line = 1
@@ -556,6 +570,9 @@ def _code_changes_from_apply_patch(patch_text: Any, payload: dict[str, Any], sou
             if hunk_match and hunk_match.group(1):
                 old_line = int(hunk_match.group(1))
                 new_line = int(hunk_match.group(2) or 1)
+                current["line_number_basis"] = "absolute"
+            elif current.get("line_number_basis") != "absolute":
+                current["line_number_basis"] = "relative"
             current["hunks"].append(
                 {
                     "old_start": old_line,
@@ -589,6 +606,8 @@ def _code_changes_from_apply_patch(patch_text: Any, payload: dict[str, Any], sou
 
 
 def _tool_call_code_changes(payload: dict[str, Any], event_tool: str = "copilot") -> list[dict[str, Any]]:
+    if str(event_tool or "").lower() == "copilot":
+        return []
     raw_tools = payload.get("tool_calls")
     if not isinstance(raw_tools, list):
         return []
@@ -835,6 +854,7 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
             raw_path = f"$.changes[{index}]"
         turn = payload.get("turn") if isinstance(payload.get("turn"), dict) else {}
         line_stats = _code_line_stats(raw, payload, lines_added, lines_deleted)
+        line_number_basis = _line_number_basis(raw, payload)
         file_path = _normalize_code_change_path(raw.get("file_path") or raw.get("path"), payload)
         normalized_change = {
             "change_index": index,
@@ -869,6 +889,11 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
             "raw_path": raw_path,
             "raw_json": raw,
         }
+        if line_number_basis:
+            normalized_change["line_number_basis"] = line_number_basis
+            normalized_change["line_numbers_are_absolute"] = line_number_basis == "absolute"
+            if isinstance(normalized_change.get("line_stats"), dict):
+                normalized_change["line_stats"]["line_number_basis"] = line_number_basis
         diff_raw_ref = payload.get("diff_raw")
         if isinstance(diff_raw_ref, dict) and diff_raw_ref.get("blob_ref"):
             normalized_change["diff_blob_ref"] = diff_raw_ref
@@ -887,6 +912,8 @@ def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dic
             "tool_call_id",
             "tool_name",
             "source",
+            "line_number_basis",
+            "line_numbers_are_absolute",
         ):
             if raw_diff_key in raw:
                 normalized_change[raw_diff_key] = raw.get(raw_diff_key)
@@ -906,7 +933,9 @@ def _failed_tool_call_ids(payload: dict[str, Any]) -> set[str]:
                 continue
             status = str(call.get("status") or "").lower()
             result_text = _compact_json_text(call.get("result_raw")).lower()
-            if _is_failed_or_rejected_tool_text(status) or _is_failed_or_rejected_tool_text(result_text):
+            if _is_failed_tool_status(status) or _is_rejected_or_interrupted_tool_text(result_text):
+                failed.add(tool_call_id)
+            elif not _is_success_tool_status(status) and _is_failed_or_rejected_tool_text(result_text):
                 failed.add(tool_call_id)
 
     process_steps = payload.get("process_steps")
@@ -921,9 +950,33 @@ def _failed_tool_call_ids(payload: dict[str, Any]) -> set[str]:
                 continue
             status = str(step.get("status") or "").lower()
             text = str(step.get("text") or "").lower()
-            if _is_failed_or_rejected_tool_text(status) or _is_failed_or_rejected_tool_text(text):
+            if _is_failed_tool_status(status) or _is_rejected_or_interrupted_tool_text(text):
+                failed.add(tool_call_id)
+            elif not _is_success_tool_status(status) and _is_failed_or_rejected_tool_text(text):
                 failed.add(tool_call_id)
     return failed
+
+
+def _is_success_tool_status(status: str) -> bool:
+    normalized = status.strip().lower().replace("_", " ").replace("-", " ")
+    return normalized in {"complete", "completed", "success", "succeeded", "ok", "done"}
+
+
+def _is_failed_tool_status(status: str) -> bool:
+    normalized = status.strip().lower().replace("_", " ").replace("-", " ")
+    return normalized in {
+        "failed",
+        "failure",
+        "error",
+        "errored",
+        "rejected",
+        "denied",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "timeout",
+        "timed out",
+    }
 
 
 def _compact_json_text(value: Any) -> str:
@@ -937,17 +990,28 @@ def _compact_json_text(value: Any) -> str:
         return str(value)
 
 
+def _is_rejected_or_interrupted_tool_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "user rejected tool use",
+            "tool use was rejected",
+            "tool interrupted",
+            "request interrupted",
+        )
+    )
+
+
 def _is_failed_or_rejected_tool_text(text: str) -> bool:
     lowered = text.lower()
+    if _is_rejected_or_interrupted_tool_text(lowered):
+        return True
     return any(
         marker in lowered
         for marker in (
             "failed",
             "error",
-            "user rejected tool use",
-            "tool use was rejected",
-            "tool interrupted",
-            "request interrupted",
             "cancelled",
             "canceled",
             "denied",
@@ -1458,10 +1522,15 @@ def normalize_codex_event(event: EventIn, payload: dict[str, Any]) -> dict[str, 
     return _normalize_for_tool(event, payload, "codex_session_jsonl_v1")
 
 
+def normalize_git_event(event: EventIn, payload: dict[str, Any]) -> dict[str, Any]:
+    return _normalize_for_tool(event, payload, "git_boundary_v1")
+
+
 def normalize_event(event: EventIn, payload: dict[str, Any]) -> dict[str, Any]:
     adapters = {
         "copilot": normalize_copilot_event,
         "claude": normalize_claude_event,
         "codex": normalize_codex_event,
+        "git": normalize_git_event,
     }
     return adapters[event.tool](event, payload)

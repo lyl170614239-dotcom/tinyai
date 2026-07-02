@@ -31,10 +31,12 @@ from ..models import (
 )
 from ..schemas.events import BatchIn, BatchOut, PluginClientOut
 from ..services.ingest_service import (
+    _event_payload_from_raw,
     ingest_batch,
     list_usernames,
     overview_counts,
 )
+from ..services.normalization_service import normalize_event
 
 router = APIRouter(prefix="/api/v1", tags=["ingest"])
 _HIDDEN_RELATED_TURN = object()
@@ -84,7 +86,6 @@ def list_plugin_heartbeats(
             "tool": row.tool,
             "username": row.username,
             "user_id": row.user_id,
-            "user_email": row.user_email,
             "user_display_name": row.user_display_name,
             "team": row.team,
             "machine_id": row.machine_id,
@@ -446,8 +447,14 @@ def _message_out(message: AiMessage) -> dict:
         "turn_index": message.turn_index,
         "role": message.role,
         "content": message.content,
+        "content_storage": message.content_storage,
         "text_len": message.text_len,
         "text_hash": message.text_hash,
+        "blob_ref": message.blob_ref,
+        "blob_encoding": message.blob_encoding,
+        "blob_original_bytes": message.blob_original_bytes,
+        "blob_compressed_bytes": message.blob_compressed_bytes,
+        "blob_sha256": message.blob_sha256,
         "raw_event_id": message.raw_event_id,
         "raw_path": message.raw_path,
         "source_key": message.source_key,
@@ -720,7 +727,6 @@ def list_recent_sessions(
             "model": session.model,
             "username": session.username,
             "user_id": session.user_id,
-            "user_email": session.user_email,
             "user_display_name": session.user_display_name,
             "team": session.team,
             "started_at": _beijing_iso(session.started_at) if session.started_at else None,
@@ -741,7 +747,6 @@ def _identity_filter_for_session(identity: str):
     return or_(
         AiSession.username.in_(candidates),
         AiSession.user_id.in_(candidates),
-        AiSession.user_email.in_(candidates),
         AiSession.user_display_name.in_(candidates),
     )
 
@@ -836,7 +841,6 @@ def _code_change_display_priority(change: AiCodeChange) -> int:
     snapshot_kind = str(change.snapshot_kind or change.change_type or "").lower()
     priorities = {
         "copilot_turn_workspace_diff": 30,
-        "copilot_turn_tool_patch": 20,
         "copilot_turn_editor_delta": 10,
         "claude_turn_workspace_diff": 30,
         "claude_turn_bash_delta": 25,
@@ -853,7 +857,6 @@ def _is_turn_code_snapshot(change: AiCodeChange) -> bool:
     snapshot_kind = str(change.snapshot_kind or change.change_type or "").lower()
     return snapshot_kind in {
         "copilot_turn_workspace_diff",
-        "copilot_turn_tool_patch",
         "copilot_turn_editor_delta",
         "claude_turn_workspace_diff",
         "claude_turn_bash_delta",
@@ -866,6 +869,9 @@ def _is_turn_code_snapshot(change: AiCodeChange) -> bool:
 
 
 def _is_displayable_code_change(change: AiCodeChange) -> bool:
+    snapshot_kind = str(change.snapshot_kind or change.change_type or "").lower()
+    if snapshot_kind == "copilot_turn_tool_patch":
+        return False
     if change.file_path:
         return True
     if (change.lines_added or 0) > 0 or (change.lines_deleted or 0) > 0:
@@ -924,7 +930,6 @@ def list_code_changes(
     elif kind == "ai_evidence":
         query = query.where(AiCodeChange.snapshot_kind.in_([
             "copilot_turn_workspace_diff",
-            "copilot_turn_tool_patch",
             "copilot_turn_editor_delta",
             "claude_turn_workspace_diff",
             "claude_turn_bash_delta",
@@ -943,6 +948,58 @@ def list_code_changes(
         "limit": limit,
         "kind": kind or "all",
         "username_filter": username,
+    }
+
+
+@router.get("/code-changes/{change_id}/raw-detail")
+def get_code_change_raw_detail(change_id: int, db: Session = Depends(get_db)) -> dict:
+    change = db.get(AiCodeChange, change_id)
+    if change is None:
+        raise HTTPException(status_code=404, detail="code change not found")
+    if not change.event_id:
+        return {
+            "code_change_id": change.id,
+            "event_id": None,
+            "source": "stored_diff_json",
+            "blob_count": 0,
+            "code_change": change.diff_json or {},
+        }
+
+    raw = db.get(RawIngestEvent, change.event_id)
+    if raw is None:
+        return {
+            "code_change_id": change.id,
+            "event_id": change.event_id,
+            "source": "stored_diff_json_missing_raw",
+            "blob_count": 0,
+            "code_change": change.diff_json or {},
+        }
+
+    event, payload = _event_payload_from_raw(db, raw)
+    normalized = normalize_event(event, payload)
+    raw_changes = normalized.get("code_changes")
+    candidates = [item for item in raw_changes if isinstance(item, dict)] if isinstance(raw_changes, list) else []
+    target_path = str(change.file_path or "").replace("\\", "/")
+    target_kind = str(change.snapshot_kind or change.change_type or "").lower()
+
+    def is_match(item: dict) -> bool:
+        item_path = str(item.get("file_path") or item.get("path") or "").replace("\\", "/")
+        item_kind = str(item.get("snapshot_kind") or item.get("change_type") or event.event_type or "").lower()
+        return item_path == target_path and item_kind == target_kind
+
+    selected = next((item for item in candidates if is_match(item)), None)
+    if selected is None:
+        selected = candidates[0] if candidates else (change.diff_json or {})
+
+    blob_count = db.execute(
+        select(func.count()).select_from(RawEventBlob).where(RawEventBlob.raw_event_id == change.event_id)
+    ).scalar_one()
+    return {
+        "code_change_id": change.id,
+        "event_id": change.event_id,
+        "source": "raw_event_rehydrated" if candidates else "stored_diff_json_no_raw_candidate",
+        "blob_count": int(blob_count or 0),
+        "code_change": selected,
     }
 
 
@@ -1046,7 +1103,6 @@ def get_session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
         "tool": session.tool,
         "username": session.username,
         "user_id": session.user_id,
-        "user_email": session.user_email,
         "user_display_name": session.user_display_name,
         "team": session.team,
         "status": session.status,

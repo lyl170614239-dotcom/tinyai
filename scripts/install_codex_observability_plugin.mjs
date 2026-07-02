@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const args = parseArgs(process.argv.slice(2));
@@ -23,6 +23,7 @@ const installPath = resolve(
   String(args["install-path"] || join(codexHome, "plugins", "cache", marketplace, pluginName, pluginVersion))
 );
 const codexConfigPath = resolve(String(args["codex-config"] || join(codexHome, "config.toml")));
+const keepOldCache = Boolean(args["keep-old-cache"]);
 
 const report = {
   pluginId: `${marketplace}/${pluginName}`,
@@ -32,10 +33,12 @@ const report = {
   codexConfigPath,
   dryRun,
   copiedPlugin: false,
+  cleanedOldCaches: [],
   updatedCodexConfig: false,
   notes: [
     "Restart Codex or open a new Codex thread after installation so Codex loads the updated plugin.",
-    "The installer writes an explicit Codex MCP server entry so telemetry capture does not depend on plugin lazy-loading."
+    "The installer writes an explicit Codex MCP server entry so telemetry capture does not depend on plugin lazy-loading.",
+    "Plugin version is resolved from the installed .codex-plugin/plugin.json manifest."
   ]
 };
 
@@ -50,8 +53,11 @@ if (!dryRun) {
   });
   validateSource(installPath);
   report.copiedPlugin = true;
-  writeCodexMcpConfig(codexConfigPath, installPath, pluginVersion);
+  writeCodexMcpConfig(codexConfigPath, installPath);
   report.updatedCodexConfig = true;
+  if (!keepOldCache) {
+    report.cleanedOldCaches = cleanupOldPluginCaches(dirname(installPath), installPath);
+  }
 }
 
 console.log(JSON.stringify(report, null, 2));
@@ -109,7 +115,32 @@ function shouldCopy(source) {
   return true;
 }
 
-function writeCodexMcpConfig(configPath, installedPluginPath, version) {
+function cleanupOldPluginCaches(cacheRoot, currentInstallPath) {
+  if (!existsSync(cacheRoot)) return [];
+  const currentName = basename(currentInstallPath);
+  const removed = [];
+  for (const entry of readdirSafe(cacheRoot)) {
+    const path = join(cacheRoot, entry);
+    if (entry === currentName || path === currentInstallPath) continue;
+    try {
+      rmSync(path, { recursive: true, force: true });
+      removed.push(path);
+    } catch {
+      report.notes.push(`Could not remove old Codex plugin cache: ${path}`);
+    }
+  }
+  return removed;
+}
+
+function readdirSafe(path) {
+  try {
+    return readdirSync(path);
+  } catch {
+    return [];
+  }
+}
+
+function writeCodexMcpConfig(configPath, installedPluginPath) {
   mkdirSync(dirname(configPath), { recursive: true });
   const existing = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
   const begin = "# BEGIN TinyAI Codex Observability MCP";
@@ -125,7 +156,6 @@ function writeCodexMcpConfig(configPath, installedPluginPath, version) {
     "[mcp_servers.tinyai_observability.env]",
     'TINYAI_OBS_TOOL = "codex"',
     `TINYAI_OBS_ENV_FILE = ${tomlString(process.env.TINYAI_OBS_ENV_FILE || join(homedir(), ".tinyai-observability", "tinyai-observability.env"))}`,
-    `TINYAI_OBS_PLUGIN_VERSION = ${tomlString(version)}`,
     'TINYAI_OBS_CAPTURE_CONVERSATION_TEXT = "true"',
     'TINYAI_OBS_AUTO_CAPTURE_CONVERSATION = "true"',
     end

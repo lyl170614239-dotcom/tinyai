@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, appendFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, appendFile, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -597,6 +598,280 @@ test("Claude turn parser does not report rejected edit tool use as a code change
   assert.equal(snapshots[0].tool_calls[0].status, "failed");
   assert.equal(snapshots[0].process_steps.some((step) => step.step_type === "tool_result" && step.status === "failed"), true);
   assert.deepEqual(snapshots[0].code_changes, []);
+});
+
+test("Claude turn parser resolves replacement edits to absolute workspace line numbers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-absolute-edit-"));
+  const workspace = join(dir, "workspace");
+  const docsDir = join(workspace, "docs");
+  await mkdir(docsDir, { recursive: true });
+  await writeFile(join(docsDir, "spec.md"), "Intro\nKeep\nAlpha\nBeta changed\nGamma\nTail\n", "utf8");
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-absolute-edit",
+      sessionId: "claude-absolute-edit-session",
+      timestamp: "2026-07-01T11:05:38.955Z",
+      cwd: workspace,
+      message: { role: "user", content: [{ type: "text", text: "更新 spec" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-absolute-edit-tool",
+      sessionId: "claude-absolute-edit-session",
+      timestamp: "2026-07-01T11:05:59.353Z",
+      cwd: workspace,
+      message: {
+        id: "msg-absolute-edit",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "call-absolute-edit",
+            name: "replace_string_in_file",
+            input: {
+              file_path: "docs/spec.md",
+              old_string: "Alpha\nBeta\nGamma",
+              new_string: "Alpha\nBeta changed\nGamma"
+            }
+          }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "absolute-edit-result",
+      sessionId: "claude-absolute-edit-session",
+      timestamp: "2026-07-01T11:06:02.562Z",
+      cwd: workspace,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call-absolute-edit", content: "Updated docs/spec.md" }]
+      }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-absolute-edit-final",
+      sessionId: "claude-absolute-edit-session",
+      timestamp: "2026-07-01T11:06:03.000Z",
+      cwd: workspace,
+      message: {
+        id: "msg-absolute-edit-final",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "已更新。" }]
+      }
+    }
+  ];
+  await writeFile(sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-absolute-edit-session",
+    workspacePath: workspace
+  });
+
+  assert.equal(snapshots.length, 1);
+  const change = snapshots[0].code_changes[0];
+  assert.equal(change.line_number_basis, "absolute");
+  assert.equal(change.line_numbers_are_absolute, true);
+  assert.equal(change.hunks[0].old_start, 3);
+  assert.equal(change.hunks[0].new_start, 3);
+  assert.deepEqual(change.hunks[0].lines.map((line) => line.old_line).filter(Boolean), [3, 4, 5]);
+  assert.deepEqual(change.hunks[0].lines.map((line) => line.new_line).filter(Boolean), [3, 4, 5]);
+});
+
+test("Claude turn parser resolves repeated replacement text through git diff hunk lines", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-repeated-edit-"));
+  const workspace = join(dir, "workspace");
+  const docsDir = join(workspace, "docs");
+  await mkdir(docsDir, { recursive: true });
+  await writeFile(join(docsDir, "story.md"), "Intro\nrepeat target\nMiddle\nold unique line\nTail\n", "utf8");
+  execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: workspace });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: workspace });
+  execFileSync("git", ["add", "."], { cwd: workspace });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: workspace, stdio: "ignore" });
+  await writeFile(join(docsDir, "story.md"), "Intro\nrepeat target\nMiddle\nrepeat target\nTail\n", "utf8");
+
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-repeated-edit",
+      sessionId: "claude-repeated-edit-session",
+      timestamp: "2026-07-01T12:05:38.955Z",
+      cwd: workspace,
+      message: { role: "user", content: [{ type: "text", text: "更新 story" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-repeated-edit-tool",
+      sessionId: "claude-repeated-edit-session",
+      timestamp: "2026-07-01T12:05:59.353Z",
+      cwd: workspace,
+      message: {
+        id: "msg-repeated-edit",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "call-repeated-edit",
+            name: "replace_string_in_file",
+            input: {
+              file_path: "docs/story.md",
+              old_string: "old unique line",
+              new_string: "repeat target"
+            }
+          }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "repeated-edit-result",
+      sessionId: "claude-repeated-edit-session",
+      timestamp: "2026-07-01T12:06:02.562Z",
+      cwd: workspace,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call-repeated-edit", content: "Updated docs/story.md" }]
+      }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-repeated-edit-final",
+      sessionId: "claude-repeated-edit-session",
+      timestamp: "2026-07-01T12:06:03.000Z",
+      cwd: workspace,
+      message: {
+        id: "msg-repeated-edit-final",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "已更新。" }]
+      }
+    }
+  ];
+  await writeFile(sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-repeated-edit-session",
+    workspacePath: workspace
+  });
+
+  assert.equal(snapshots.length, 1);
+  const change = snapshots[0].code_changes[0];
+  assert.equal(change.line_number_basis, "absolute");
+  assert.equal(change.line_numbers_are_absolute, true);
+  assert.equal(change.hunks[0].old_start, 4);
+  assert.equal(change.hunks[0].new_start, 4);
+  assert.equal(change.hunks[0].lines.find((line) => line.line_type === "removed")?.old_line, 4);
+  assert.equal(change.hunks[0].lines.find((line) => line.line_type === "added")?.new_line, 4);
+});
+
+test("Claude turn parser resolves deletion-only edits through git diff hunk lines", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-claude-delete-edit-"));
+  const workspace = join(dir, "workspace");
+  const docsDir = join(workspace, "docs");
+  await mkdir(docsDir, { recursive: true });
+  await writeFile(join(docsDir, "story.md"), "Intro\nKeep\nDelete me\nTail\n", "utf8");
+  execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: workspace });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: workspace });
+  execFileSync("git", ["add", "."], { cwd: workspace });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: workspace, stdio: "ignore" });
+  await writeFile(join(docsDir, "story.md"), "Intro\nKeep\nTail\n", "utf8");
+
+  const sessionFile = join(dir, "claude-session.jsonl");
+  const entries = [
+    {
+      type: "user",
+      uuid: "request-delete-edit",
+      sessionId: "claude-delete-edit-session",
+      timestamp: "2026-07-01T13:05:38.955Z",
+      cwd: workspace,
+      message: { role: "user", content: [{ type: "text", text: "删除一句话" }] }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-delete-edit-tool",
+      sessionId: "claude-delete-edit-session",
+      timestamp: "2026-07-01T13:05:59.353Z",
+      cwd: workspace,
+      message: {
+        id: "msg-delete-edit",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "call-delete-edit",
+            name: "replace_string_in_file",
+            input: {
+              file_path: "docs/story.md",
+              old_string: "Delete me\n",
+              new_string: ""
+            }
+          }
+        ]
+      }
+    },
+    {
+      type: "user",
+      uuid: "delete-edit-result",
+      sessionId: "claude-delete-edit-session",
+      timestamp: "2026-07-01T13:06:02.562Z",
+      cwd: workspace,
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call-delete-edit", content: "Updated docs/story.md" }]
+      }
+    },
+    {
+      type: "assistant",
+      uuid: "assistant-delete-edit-final",
+      sessionId: "claude-delete-edit-session",
+      timestamp: "2026-07-01T13:06:03.000Z",
+      cwd: workspace,
+      message: {
+        id: "msg-delete-edit-final",
+        role: "assistant",
+        model: "deepseek-v4-pro",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "已删除。" }]
+      }
+    }
+  ];
+  await writeFile(sessionFile, entries.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+
+  const snapshots = await captureLatestClaudeTurnSnapshots({
+    includeText: true,
+    latestOnly: false,
+    sessionFile,
+    sessionId: "claude-delete-edit-session",
+    workspacePath: workspace
+  });
+
+  assert.equal(snapshots.length, 1);
+  const change = snapshots[0].code_changes[0];
+  assert.equal(change.line_number_basis, "absolute");
+  assert.equal(change.line_numbers_are_absolute, true);
+  assert.equal(change.hunks[0].old_start, 3);
+  assert.equal(change.hunks[0].new_start, 3);
+  assert.equal(change.hunks[0].lines.find((line) => line.line_type === "removed")?.old_line, 3);
 });
 
 test("Claude turn parser marks an unfinished previous turn abandoned when the next real user turn starts", async () => {

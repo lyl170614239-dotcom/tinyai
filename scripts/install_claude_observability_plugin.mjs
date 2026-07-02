@@ -91,7 +91,7 @@ if (!dryRun) {
   writeJson(settingsPath, settings);
   report.updatedSettings = true;
 
-  const claudeJsonUpdate = updateClaudeProjectMcpConfigs(claudeJsonPath, installPath, pluginVersion);
+  const claudeJsonUpdate = updateClaudeProjectMcpConfigs(claudeJsonPath, installPath);
   report.updatedClaudeJsonProjectMcpConfigs = claudeJsonUpdate.updatedCount;
 
   if (!keepOldCache) {
@@ -153,7 +153,7 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function updateClaudeProjectMcpConfigs(path, nextInstallPath, nextVersion) {
+function updateClaudeProjectMcpConfigs(path, nextInstallPath) {
   if (!existsSync(path)) return { updatedCount: 0 };
   const root = readJson(path, "Claude global config", {});
   const projects = root.projects && typeof root.projects === "object" && !Array.isArray(root.projects) ? root.projects : {};
@@ -179,9 +179,15 @@ function updateClaudeProjectMcpConfigs(path, nextInstallPath, nextVersion) {
       if (!server.env || typeof server.env !== "object" || Array.isArray(server.env)) {
         server.env = {};
       }
-      if (server.env.TINYAI_OBS_PLUGIN_VERSION !== nextVersion) {
-        server.env.TINYAI_OBS_PLUGIN_VERSION = nextVersion;
-        changed = true;
+      for (const legacyEnvKey of [
+        "TINYAI_OBS_PLUGIN_VERSION",
+        "TINYAI_OBS_USER_EMAIL",
+        "TINYAI_OBS_CLAUDE_USER_EMAIL"
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(server.env, legacyEnvKey)) {
+          delete server.env[legacyEnvKey];
+          changed = true;
+        }
       }
       if (changed) updatedCount += 1;
     }

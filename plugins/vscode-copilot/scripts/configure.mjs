@@ -25,7 +25,6 @@ const token = String(
     ""
 );
 const detectedGitName = gitConfig("user.name");
-const detectedGitEmail = gitConfig("user.email");
 const userName = String(
   args["user-name"] ||
     args.user ||
@@ -34,9 +33,10 @@ const userName = String(
     detectedGitName ||
     ""
 ).trim();
-const userEmail = String(args["user-email"] || process.env.TINYAI_OBS_USER_EMAIL || detectedGitEmail || "").trim();
-const userId = String(args["user-id"] || process.env.TINYAI_OBS_USER_ID || userEmail || slugIdentity(userName) || "").trim();
+const userId = String(args["user-id"] || process.env.TINYAI_OBS_USER_ID || slugIdentity(userName) || "").trim();
 const team = String(args.team || process.env.TINYAI_OBS_TEAM || "").trim();
+const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const pluginVersion = String(packageJson.version || "unknown");
 
 const settingsPath = resolveSettingsPath(scope, vscodeFlavor, args.workspace);
 const settings = readJsonc(settingsPath);
@@ -45,7 +45,6 @@ const tinyaiSettings = {
   "tinyaiObservability.token": token,
   "tinyaiObservability.userName": userName,
   "tinyaiObservability.userId": userId,
-  "tinyaiObservability.userEmail": userEmail,
   "tinyaiObservability.team": team,
   "tinyaiObservability.captureConversationText": boolArg("capture-conversation-text", true),
   "tinyaiObservability.captureVisibleReasoningText": boolArg("capture-visible-reasoning-text", false),
@@ -63,7 +62,6 @@ const report = {
   identity: {
     userName,
     userId,
-    userEmail,
     team,
     source: userName === detectedGitName ? "git-config-or-env" : "argument-or-env"
   },
@@ -198,17 +196,16 @@ function makeHeartbeat() {
   const now = new Date().toISOString();
   const username = userName || process.env.USER || process.env.USERNAME || "unknown";
   const hostHash = createHash("sha256").update(hostname()).digest("hex").slice(0, 32);
-  const seed = `${userId || userEmail || username}:${hostHash}:vscode-configure`;
+  const seed = `${userId || username}:${hostHash}:vscode-configure`;
   const clientId = createHash("sha256").update(seed).digest("hex").slice(0, 32);
   const eventId = createHash("sha256").update(`${seed}:${now}`).digest("hex").slice(0, 32);
   const taskId = `vscode-config-${eventId}`.slice(0, 64);
   return {
     client_id: clientId,
     plugin_name: "tinyai-observability-vscode-configure",
-    plugin_version: "0.1.0",
+    plugin_version: pluginVersion,
     username,
     user_id: userId || undefined,
-    user_email: userEmail || undefined,
     user_display_name: userName || undefined,
     team: team || undefined,
     host_hash: hostHash,
@@ -222,7 +219,6 @@ function makeHeartbeat() {
         source_confidence: "direct",
         username,
         user_id: userId || undefined,
-        user_email: userEmail || undefined,
         user_display_name: userName || undefined,
         team: team || undefined,
         host_hash: hostHash,

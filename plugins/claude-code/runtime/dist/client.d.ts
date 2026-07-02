@@ -26,6 +26,7 @@ export declare class CollectorClient {
         sent: number;
         remaining: number;
     }>;
+    private flushQueueOnce;
     private queuePathFor;
     private postBatch;
     private postBatchToUrl;
