@@ -32,9 +32,11 @@ from ..models import (
 from ..schemas.events import BatchIn, BatchOut, PluginClientOut
 from ..services.ingest_service import (
     _event_payload_from_raw,
+    _local_now,
     ingest_batch,
     list_usernames,
     overview_counts,
+    process_pending_ingest_jobs,
 )
 from ..services.normalization_service import normalize_event
 
@@ -549,6 +551,77 @@ def _code_change_out(change: AiCodeChange) -> dict:
     return _code_change_out_with_line_attrs(change, [])
 
 
+SUMMARY_DIFF_JSON_KEYS = {
+    "ai_assisted_human_edited_lines_added",
+    "ai_assisted_human_edited_lines_modified",
+    "ai_attribution_method",
+    "ai_current_lines_added",
+    "ai_current_lines_deleted",
+    "ai_deleted_ratio",
+    "ai_lines_added",
+    "ai_lines_deleted",
+    "ai_lines_modified",
+    "ai_moved_lines",
+    "ai_overall_change_ratio",
+    "ai_origin_lines_deleted_by_human",
+    "ai_added_ratio",
+    "attribution_status",
+    "branch",
+    "commit_sha",
+    "diff_blob_ref",
+    "diff_hash",
+    "diff_truncated",
+    "event_type",
+    "excluded_from_ai_attribution",
+    "file_path",
+    "files_changed",
+    "generated_artifact",
+    "generated_artifact_reason",
+    "human_current_lines_added",
+    "human_current_lines_deleted",
+    "human_current_lines_modified",
+    "human_lines_added",
+    "human_lines_deleted",
+    "human_lines_modified",
+    "line_attribution_summary",
+    "line_attribution_truncated",
+    "lines_modified",
+    "matched_ai_change_event_ids",
+    "product_detail_policy",
+    "snapshot_kind",
+    "unattributed_lines_added",
+    "unattributed_lines_deleted",
+}
+
+
+def _summary_diff_json(diff_json: dict | None) -> dict | None:
+    if not isinstance(diff_json, dict):
+        return diff_json
+    return {key: value for key, value in diff_json.items() if key in SUMMARY_DIFF_JSON_KEYS}
+
+
+def _code_change_summary_out(change: AiCodeChange) -> dict:
+    return {
+        "id": change.id,
+        "session_id": change.session_id,
+        "task_id": change.task_id,
+        "event_id": change.event_id,
+        "turn_index": change.turn_index,
+        "request_id": change.request_id,
+        "response_id": change.response_id,
+        "file_path": change.file_path,
+        "change_type": change.change_type,
+        "snapshot_kind": change.snapshot_kind,
+        "diff_hash": change.diff_hash,
+        "lines_added": change.lines_added,
+        "lines_deleted": change.lines_deleted,
+        "is_effective": change.is_effective,
+        "superseded_by_event_id": change.superseded_by_event_id,
+        "diff_json": _summary_diff_json(change.diff_json),
+        "occurred_at": _beijing_iso(change.occurred_at),
+    }
+
+
 def _line_number_for_attr(line: dict, line_type: str) -> int | None:
     raw = line.get("old_line") if line_type == "removed" else line.get("new_line")
     try:
@@ -921,6 +994,7 @@ def list_code_changes(
     kind: Optional[str] = Query(default=None, pattern="^(commit|ai_evidence|all)?$"),
     username: Optional[str] = Query(default=None, max_length=256),
     limit: int = Query(200, ge=1, le=1000),
+    summary: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> dict:
     query = select(AiCodeChange).order_by(AiCodeChange.occurred_at.desc(), AiCodeChange.id.desc()).limit(limit)
@@ -944,10 +1018,11 @@ def list_code_changes(
         query = query.where(_identity_filter_for_session(username))
     changes = db.execute(query).scalars().all()
     return {
-        "code_changes": _code_changes_out_with_attrs(db, changes),
+        "code_changes": [_code_change_summary_out(change) for change in changes] if summary else _code_changes_out_with_attrs(db, changes),
         "limit": limit,
         "kind": kind or "all",
         "username_filter": username,
+        "summary": summary,
     }
 
 
@@ -1000,6 +1075,44 @@ def get_code_change_raw_detail(change_id: int, db: Session = Depends(get_db)) ->
         "source": "raw_event_rehydrated" if candidates else "stored_diff_json_no_raw_candidate",
         "blob_count": int(blob_count or 0),
         "code_change": selected,
+    }
+
+
+@router.post("/raw-events/{event_id}/reprocess", dependencies=[Depends(require_token)])
+def reprocess_raw_event(
+    event_id: str,
+    process_line_jobs: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> dict:
+    raw = db.get(RawIngestEvent, event_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="raw event not found")
+    job = db.execute(select(IngestJob).where(IngestJob.raw_event_id == event_id)).scalar_one_or_none()
+    if job is None:
+        job = IngestJob(
+            raw_event_id=event_id,
+            event_type=raw.event_type,
+            status="pending",
+            attempts=0,
+            max_attempts=max(1, get_settings().ingest_job_max_attempts),
+            next_run_at=_local_now(),
+        )
+        db.add(job)
+    else:
+        job.status = "pending"
+        job.locked_at = None
+        job.locked_by = None
+        job.last_error = None
+        job.next_run_at = _local_now()
+    db.commit()
+    stats = process_pending_ingest_jobs(db, limit=1, worker_id="admin-reprocess", process_line_jobs=process_line_jobs)
+    refreshed = db.execute(select(IngestJob).where(IngestJob.raw_event_id == event_id)).scalar_one_or_none()
+    return {
+        "event_id": event_id,
+        "status": refreshed.status if refreshed else None,
+        "attempts": refreshed.attempts if refreshed else None,
+        "last_error": refreshed.last_error if refreshed else None,
+        "stats": stats,
     }
 
 

@@ -1212,6 +1212,54 @@ function attributionLabel(value: unknown) {
 
 function commitAttributionCounts(change: AiCodeChange, rawInput?: Record<string, unknown>) {
   const raw = rawInput || codeRaw(change);
+  const attributionStatus = readableValue(raw.attribution_status, "");
+  const generated = raw.generated_artifact === true || raw.excluded_from_ai_attribution === true;
+  if (attributionStatus === "pending") {
+    return {
+      aiAdded: 0,
+      aiDeleted: 0,
+      aiModified: 0,
+      humanAdded: 0,
+      humanDeleted: 0,
+      humanCurrentAdded: 0,
+      humanCurrentDeleted: 0,
+      humanCurrentModified: 0,
+      aiAssistedHumanEditedAdded: 0,
+      aiAssistedHumanEditedModified: 0,
+      aiOriginDeletedByHuman: 0,
+      standaloneAiOriginDeletedByHuman: 0,
+      humanDedupedChanges: 0,
+      pendingAdded: change.lines_added,
+      pendingDeleted: change.lines_deleted,
+      generatedAdded: 0,
+      generatedDeleted: 0,
+      attributionStatus,
+      generated,
+    };
+  }
+  if (generated || attributionStatus === "skipped") {
+    return {
+      aiAdded: 0,
+      aiDeleted: 0,
+      aiModified: 0,
+      humanAdded: 0,
+      humanDeleted: 0,
+      humanCurrentAdded: 0,
+      humanCurrentDeleted: 0,
+      humanCurrentModified: 0,
+      aiAssistedHumanEditedAdded: 0,
+      aiAssistedHumanEditedModified: 0,
+      aiOriginDeletedByHuman: 0,
+      standaloneAiOriginDeletedByHuman: 0,
+      humanDedupedChanges: 0,
+      pendingAdded: 0,
+      pendingDeleted: 0,
+      generatedAdded: change.lines_added,
+      generatedDeleted: change.lines_deleted,
+      attributionStatus: attributionStatus || "skipped",
+      generated,
+    };
+  }
   const aiAdded = numericValue(raw.ai_lines_added, 0);
   const aiDeleted = numericValue(raw.ai_lines_deleted, 0);
   const aiModified = numericValue(raw.ai_lines_modified, 0);
@@ -1239,6 +1287,12 @@ function commitAttributionCounts(change: AiCodeChange, rawInput?: Record<string,
     aiOriginDeletedByHuman,
     standaloneAiOriginDeletedByHuman,
     humanDedupedChanges,
+    pendingAdded: numericValue(raw.unattributed_lines_added, 0),
+    pendingDeleted: numericValue(raw.unattributed_lines_deleted, 0),
+    generatedAdded: 0,
+    generatedDeleted: 0,
+    attributionStatus: attributionStatus || "complete",
+    generated,
   };
 }
 
@@ -1263,6 +1317,10 @@ type CommitGroup = {
   aiAssistedHumanEditedAdded: number;
   aiAssistedHumanEditedModified: number;
   aiOriginDeletedByHuman: number;
+  pendingAdded: number;
+  pendingDeleted: number;
+  generatedAdded: number;
+  generatedDeleted: number;
   matchedEvidenceCount: number;
   hasBlobOrTruncated: boolean;
 };
@@ -1328,6 +1386,10 @@ function groupCommitChanges(changes: AiCodeChange[]): CommitGroup[] {
       aiAssistedHumanEditedAdded: 0,
       aiAssistedHumanEditedModified: 0,
       aiOriginDeletedByHuman: 0,
+      pendingAdded: 0,
+      pendingDeleted: 0,
+      generatedAdded: 0,
+      generatedDeleted: 0,
       matchedEvidenceCount: 0,
       hasBlobOrTruncated: false,
     };
@@ -1349,6 +1411,10 @@ function groupCommitChanges(changes: AiCodeChange[]): CommitGroup[] {
     next.aiAssistedHumanEditedAdded += counts.aiAssistedHumanEditedAdded;
     next.aiAssistedHumanEditedModified += counts.aiAssistedHumanEditedModified;
     next.aiOriginDeletedByHuman += counts.standaloneAiOriginDeletedByHuman;
+    next.pendingAdded += counts.pendingAdded;
+    next.pendingDeleted += counts.pendingDeleted;
+    next.generatedAdded += counts.generatedAdded;
+    next.generatedDeleted += counts.generatedDeleted;
     next.sessionIds = uniqueStrings([...next.sessionIds, change.session_id]);
     next.evidenceEventIds = uniqueStrings([...next.evidenceEventIds, ...matchedIds]);
     next.matchedEvidenceCount = next.evidenceEventIds.length;
@@ -1913,6 +1979,8 @@ function CommitAttributionCard({ group, defaultOpen = false }: { group: CommitGr
   const assistedTotal = group.aiAssistedHumanEditedAdded + group.aiAssistedHumanEditedModified;
   const denominator = aiTotal + humanTotal + assistedTotal + group.aiOriginDeletedByHuman;
   const aiRatio = denominator > 0 ? `${((aiTotal / denominator) * 100).toFixed(1)}%` : "0.0%";
+  const pendingTotal = group.pendingAdded + group.pendingDeleted;
+  const generatedTotal = group.generatedAdded + group.generatedDeleted;
   return (
     <details className="commit-card" open={defaultOpen}>
       <summary className="commit-card-summary">
@@ -1930,6 +1998,8 @@ function CommitAttributionCard({ group, defaultOpen = false }: { group: CommitGr
           <span className="commit-pill human">人工当前（未命中 AI 证据） +{fmtNumber(group.humanCurrentAdded)} -{fmtNumber(group.humanCurrentDeleted)} 改{fmtNumber(group.humanCurrentModified)}</span>
           <span className="commit-pill assisted">AI 辅助后人工改写 {fmtNumber(assistedTotal)}</span>
           <span className="commit-pill">AI 占比 {aiRatio}</span>
+          {pendingTotal > 0 && <span className="commit-pill blob">归因中 +{fmtNumber(group.pendingAdded)} -{fmtNumber(group.pendingDeleted)}</span>}
+          {generatedTotal > 0 && <span className="commit-pill blob">生成物已排除 +{fmtNumber(group.generatedAdded)} -{fmtNumber(group.generatedDeleted)}</span>}
           {group.matchedEvidenceCount > 0 && <span className="commit-pill">命中 {group.matchedEvidenceCount} 条 AI 证据</span>}
           {group.hasBlobOrTruncated && <span className="commit-pill blob">有大文件 blob</span>}
         </div>
@@ -1947,11 +2017,19 @@ function CommitAttributionCard({ group, defaultOpen = false }: { group: CommitGr
               <div className="commit-file-row" key={`commit-file-${change.id}`}>
                 <strong>{filePath}</strong>
                 <span>总量 +{fmtNumber(change.lines_added)} -{fmtNumber(change.lines_deleted)}</span>
-                <span>AI 当前 +{fmtNumber(counts.aiAdded)} -{fmtNumber(counts.aiDeleted)} 改{fmtNumber(counts.aiModified)}</span>
-                <span>人工当前（未命中 AI 证据） +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}</span>
-                {(counts.aiAssistedHumanEditedAdded || counts.aiAssistedHumanEditedModified) ? (
-                  <span>AI 辅助后人工改写 +{fmtNumber(counts.aiAssistedHumanEditedAdded)} 改{fmtNumber(counts.aiAssistedHumanEditedModified)}</span>
-                ) : <span>AI 辅助后人工改写 0</span>}
+                {counts.attributionStatus === "pending" ? (
+                  <span>归因中，不计入 AI/人工占比</span>
+                ) : counts.generated ? (
+                  <span>生成物已排除，不计入 AI/人工占比</span>
+                ) : (
+                  <>
+                    <span>AI 当前 +{fmtNumber(counts.aiAdded)} -{fmtNumber(counts.aiDeleted)} 改{fmtNumber(counts.aiModified)}</span>
+                    <span>人工当前（未命中 AI 证据） +{fmtNumber(counts.humanCurrentAdded)} -{fmtNumber(counts.humanCurrentDeleted)} 改{fmtNumber(counts.humanCurrentModified)}</span>
+                    {(counts.aiAssistedHumanEditedAdded || counts.aiAssistedHumanEditedModified) ? (
+                      <span>AI 辅助后人工改写 +{fmtNumber(counts.aiAssistedHumanEditedAdded)} 改{fmtNumber(counts.aiAssistedHumanEditedModified)}</span>
+                    ) : <span>AI 辅助后人工改写 0</span>}
+                  </>
+                )}
               </div>
             );
           })}
@@ -2649,7 +2727,7 @@ export default function App() {
 
   async function loadGlobalCodeChanges(username = "") {
     const qs = username ? `&username=${encodeURIComponent(username)}` : "";
-    const res = await apiFetch(`/api/v1/code-changes?kind=commit&limit=500${qs}`);
+    const res = await apiFetch(`/api/v1/code-changes?kind=commit&limit=500&summary=true${qs}`);
     const body: CodeChangesResponse = await res.json();
     setGlobalCodeChanges(body.code_changes || []);
   }

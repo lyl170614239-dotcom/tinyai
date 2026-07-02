@@ -133,7 +133,7 @@ class IngestServiceTests(unittest.TestCase):
         )
 
         result = ingest_batch(self.db, batch)
-        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker", process_line_jobs=False)
         sessions = self.db.execute(select(AiSession).order_by(AiSession.session_id)).scalars().all()
         changes = self.db.execute(select(AiCodeChange).order_by(AiCodeChange.event_id, AiCodeChange.id)).scalars().all()
         raw_commit = self.db.get(RawIngestEvent, "git-commit-boundary-event")
@@ -891,7 +891,7 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(self.db.execute(select(NormalizedIngestEvent)).scalars().all(), [])
         self.assertEqual(self.db.execute(select(AiSession)).scalars().all(), [])
 
-        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker", process_line_jobs=False)
 
         self.assertEqual(stats["succeeded"], 1)
         self.assertEqual(self.db.execute(select(IngestJob)).scalars().one().status, "succeeded")
@@ -4645,7 +4645,7 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(diff_json["product_detail_policy"], "line_attribution_summary_only")
         self.assertEqual(diff_json["line_attribution_summary"]["total_added_lines"], 5001)
 
-    def test_large_commit_snapshot_skips_sync_line_matching_when_captured_lines_exceed_limit(self):
+    def test_large_commit_snapshot_defers_sync_line_matching_when_captured_lines_exceed_limit(self):
         file_path = "collector-server/tests/huge-commit.py"
         lines = [
             {
@@ -4702,18 +4702,188 @@ class IngestServiceTests(unittest.TestCase):
         )
 
         ingest_batch(self.db, batch)
-        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker", process_line_jobs=False)
         change = self.db.execute(select(AiCodeChange).where(AiCodeChange.event_id == "huge-commit-summary-only")).scalars().one()
         diff_json = change.diff_json
 
         self.assertEqual(stats["succeeded"], 1)
         self.assertEqual(change.lines_added, 5001)
-        self.assertEqual(diff_json["human_lines_added"], 5001)
+        self.assertEqual(diff_json["attribution_status"], "pending")
+        self.assertEqual(diff_json["human_lines_added"], 0)
         self.assertEqual(diff_json["ai_lines_added"], 0)
         self.assertEqual(diff_json["product_detail_policy"], "line_attribution_summary_only")
-        self.assertEqual(diff_json["line_attribution_summary"]["total_added_lines"], 5001)
+        self.assertEqual(diff_json["line_attribution_summary"]["total_added_lines"], 0)
+        self.assertEqual(diff_json["line_attribution_summary"]["raw_total_added_lines"], 5001)
         self.assertTrue(diff_json["line_attribution_summary"]["sync_line_matching_skipped"])
         self.assertNotIn("hunks", diff_json)
+
+    def test_large_commit_snapshot_async_line_job_refines_ai_attribution(self):
+        file_path = "collector-server/tests/huge-async-commit.py"
+
+        def line_hash(text: str) -> str:
+            return hashlib.sha256(f"{file_path}\0{text}".encode("utf-8")).hexdigest()
+
+        ai_change = EventIn(
+            event_id="huge-async-ai-line",
+            task_id="task-huge-async-ai",
+            session_id="copilot-session-huge-async",
+            tool="copilot",
+            event_type="code_change",
+            occurred_at=datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            workspace_path_hash="workspace-huge-async",
+            payload={
+                "session_id": "copilot-session-huge-async",
+                "snapshot_kind": "copilot_turn_workspace_diff",
+                "file_path": file_path,
+                "lines_added": 1,
+                "lines_deleted": 0,
+                "hunks": [
+                    {
+                        "old_start": 0,
+                        "old_lines": 0,
+                        "new_start": 1,
+                        "new_lines": 1,
+                        "lines": [
+                            {"line_type": "added", "new_line": 1, "text": "AI_LINE", "text_hash": line_hash("AI_LINE")},
+                        ],
+                    }
+                ],
+            },
+        )
+        commit_lines = [
+            {"line_type": "added", "new_line": 1, "text": "AI_LINE", "text_hash": line_hash("AI_LINE")},
+            *[
+                {
+                    "line_type": "added",
+                    "new_line": index + 2,
+                    "text": f"human-{index}",
+                    "text_hash": line_hash(f"human-{index}"),
+                }
+                for index in range(5000)
+            ],
+        ]
+        large_commit = EventIn(
+            event_id="huge-async-commit",
+            task_id="commit-huge-async",
+            tool="git",
+            event_type="commit_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 5, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            workspace_path_hash="workspace-huge-async",
+            payload={
+                "commit_sha": "hugeasynccommit",
+                "branch": "main",
+                "snapshot_kind": "commit",
+                "files_changed": 1,
+                "lines_added": 5001,
+                "lines_deleted": 0,
+                "file_paths": [file_path],
+                "files": [
+                    {
+                        "file_path": file_path,
+                        "lines_added": 5001,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 5001,
+                                "lines": commit_lines,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-1",
+            plugin_name="tinyai-observability-git-hook",
+            plugin_version="0.1.20",
+            username="lyl",
+            user_id="user-1",
+            events=[ai_change, large_commit],
+        )
+
+        ingest_batch(self.db, batch)
+        ingest_stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker", process_line_jobs=False)
+        pending_commit = self.db.execute(select(AiCodeChange).where(AiCodeChange.event_id == "huge-async-commit")).scalars().one()
+
+        self.assertEqual(ingest_stats["succeeded"], 2)
+        self.assertEqual(pending_commit.diff_json["attribution_status"], "pending")
+
+        line_stats = process_pending_line_attribution_jobs(self.db, limit=10, worker_id="line-worker")
+        refined_commit = self.db.get(AiCodeChange, pending_commit.id)
+        diff_json = refined_commit.diff_json
+
+        self.assertEqual(line_stats["succeeded"], 2)
+        self.assertEqual(diff_json["attribution_status"], "complete")
+        self.assertEqual(diff_json["ai_current_lines_added"], 1)
+        self.assertEqual(diff_json["human_current_lines_added"], 5000)
+        self.assertEqual(diff_json["matched_ai_change_event_ids"], ["huge-async-ai-line"])
+
+    def test_generated_commit_artifact_is_excluded_from_ai_attribution(self):
+        file_path = "dashboard-minimal/.vite/deps/react-dom_client.js"
+        event = EventIn(
+            event_id="generated-commit-artifact",
+            task_id="commit-generated",
+            tool="git",
+            event_type="commit_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 5, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            payload={
+                "commit_sha": "generatedcommit",
+                "branch": "main",
+                "snapshot_kind": "commit",
+                "files_changed": 1,
+                "lines_added": 200,
+                "lines_deleted": 0,
+                "file_paths": [file_path],
+                "files": [
+                    {
+                        "file_path": file_path,
+                        "lines_added": 200,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 1,
+                                "lines": [{"line_type": "added", "new_line": 1, "text": "bundle", "text_hash": "hash"}],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-1",
+            plugin_name="tinyai-observability-git-hook",
+            plugin_version="0.1.20",
+            username="lyl",
+            user_id="user-1",
+            events=[event],
+        )
+
+        ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        change = self.db.execute(select(AiCodeChange).where(AiCodeChange.event_id == "generated-commit-artifact")).scalars().one()
+        diff_json = change.diff_json
+
+        self.assertEqual(stats["succeeded"], 1)
+        self.assertTrue(diff_json["generated_artifact"])
+        self.assertTrue(diff_json["excluded_from_ai_attribution"])
+        self.assertEqual(diff_json["attribution_status"], "skipped")
+        self.assertEqual(diff_json["human_lines_added"], 0)
+        self.assertEqual(diff_json["ai_lines_added"], 0)
 
     def test_session_detail_prefers_tool_patch_over_legacy_editor_delta(self):
         editor_delta = AiCodeChange(

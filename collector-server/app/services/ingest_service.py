@@ -64,6 +64,36 @@ PROPOSED_ONLY_CODE_SNAPSHOT_KINDS = {
     "copilot_turn_tool_patch",
 }
 PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT = 5_000
+GENERATED_ARTIFACT_DIRS = {
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".vite",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+}
+GENERATED_ARTIFACT_SUFFIXES = (
+    ".bundle.js",
+    ".bundle.css",
+    ".chunk.js",
+    ".chunk.css",
+    ".generated.js",
+    ".generated.ts",
+    ".generated.tsx",
+    ".generated.css",
+    ".min.js",
+    ".min.css",
+)
+GENERATED_ARTIFACT_FILENAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+}
 AI_TURN_CODE_SNAPSHOT_KINDS = {
     "copilot_turn_editor_delta",
     "copilot_turn_workspace_diff",
@@ -1418,7 +1448,7 @@ def _line_attr_rows_for_file(db: Session, scope: dict[str, str], file_path: str)
     query = (
         select(AiLineAttribution)
         .where(AiLineAttribution.file_path == file_path[:1024])
-        .order_by(AiLineAttribution.line_no.asc(), AiLineAttribution.id.asc())
+        .order_by(AiLineAttribution.line_no.asc(), AiLineAttribution.updated_at.desc(), AiLineAttribution.id.desc())
     )
     return db.execute(_line_attr_scope_filter(query, scope)).scalars().all()
 
@@ -1748,6 +1778,33 @@ def _change_payload_has_absolute_line_numbers(change: dict[str, Any], event_type
     if event_type_lower == "commit_snapshot" or snapshot_kind in {"commit_snapshot", "commit"}:
         return True
     return snapshot_kind in ABSOLUTE_LINE_NUMBER_SNAPSHOT_KINDS
+
+
+def _generated_artifact_reason(file_path: str | None) -> str | None:
+    normalized = _normalize_code_path(file_path)
+    if not normalized:
+        return None
+    parts = [part for part in normalized.split("/") if part]
+    if any(part in GENERATED_ARTIFACT_DIRS for part in parts):
+        return "generated_or_dependency_directory"
+    filename = parts[-1] if parts else normalized
+    if filename in GENERATED_ARTIFACT_FILENAMES:
+        return "lockfile"
+    lower = normalized.lower()
+    if lower.endswith(GENERATED_ARTIFACT_SUFFIXES):
+        return "generated_bundle_suffix"
+    return None
+
+
+def _mark_generated_artifact(change: dict[str, Any]) -> dict[str, Any]:
+    reason = _generated_artifact_reason(str(change.get("file_path") or change.get("path") or ""))
+    if not reason:
+        change.setdefault("generated_artifact", False)
+        return change
+    change["generated_artifact"] = True
+    change["generated_artifact_reason"] = reason
+    change["excluded_from_ai_attribution"] = True
+    return change
 
 
 def _change_has_absolute_line_numbers(event: EventIn, change: dict[str, Any]) -> bool:
@@ -2172,19 +2229,113 @@ def _apply_summary_only_commit_attribution(change: dict[str, Any], commit_file_p
     return change
 
 
-def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime, change: dict[str, Any]) -> dict[str, Any]:
+def _apply_pending_commit_attribution(change: dict[str, Any], commit_file_path: str, reason: str) -> dict[str, Any]:
+    raw_added_total = int(change.get("lines_added") or 0)
+    raw_deleted_total = int(change.get("lines_deleted") or 0)
+    line_stats = change.get("line_stats") if isinstance(change.get("line_stats"), dict) else {}
+    status = "skipped" if change.get("generated_artifact") else "pending"
+    line_attribution_summary = {
+        "file_path": commit_file_path,
+        "total_added_lines": 0,
+        "total_deleted_lines": 0,
+        "raw_total_added_lines": raw_added_total,
+        "raw_total_deleted_lines": raw_deleted_total,
+        "ignored_blank_lines": 0,
+        "ai_added_lines": 0,
+        "human_added_lines": 0,
+        "ai_deleted_lines": 0,
+        "human_deleted_lines": 0,
+        "ai_current_lines_added": 0,
+        "human_current_lines_added": 0,
+        "ai_assisted_human_edited_lines_added": 0,
+        "ai_current_lines_deleted": 0,
+        "human_current_lines_deleted": 0,
+        "ai_origin_lines_deleted_by_human": 0,
+        "ai_assisted_human_edited_lines_modified": 0,
+        "human_current_lines_modified": 0,
+        "ai_moved_lines": 0,
+        "lines_modified": 0,
+        "ai_lines_modified": 0,
+        "human_lines_modified": 0,
+        "unattributed_lines_added": raw_added_total,
+        "unattributed_lines_deleted": raw_deleted_total,
+        "captured_added_line_count": int(line_stats.get("captured_added_line_count") or 0),
+        "captured_deleted_line_count": int(line_stats.get("captured_deleted_line_count") or 0),
+        "full_line_attribution": False,
+        "full_line_attribution_limit": PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT,
+        "sync_line_matching_skipped": True,
+        "skip_reason": reason,
+    }
+    change.update(
+        {
+            "ai_lines_added": 0,
+            "human_lines_added": 0,
+            "ai_lines_deleted": 0,
+            "human_lines_deleted": 0,
+            "ai_current_lines_added": 0,
+            "human_current_lines_added": 0,
+            "ai_assisted_human_edited_lines_added": 0,
+            "ai_current_lines_deleted": 0,
+            "human_current_lines_deleted": 0,
+            "ai_origin_lines_deleted_by_human": 0,
+            "ai_assisted_human_edited_lines_modified": 0,
+            "human_current_lines_modified": 0,
+            "ai_moved_lines": 0,
+            "lines_modified": 0,
+            "ai_lines_modified": 0,
+            "human_lines_modified": 0,
+            "unattributed_lines_added": raw_added_total,
+            "unattributed_lines_deleted": raw_deleted_total,
+            "ai_added_ratio": 0.0,
+            "ai_deleted_ratio": 0.0,
+            "ai_modified_ratio": 0.0,
+            "ai_overall_change_ratio": 0.0,
+            "ai_overall_change_ratio_raw_ops": 0.0,
+            "matched_ai_change_event_ids": [],
+            "line_attribution": dict(line_attribution_summary),
+            "line_attribution_summary": line_attribution_summary,
+            "line_attribution_truncated": True,
+            "attribution_status": status,
+            "ai_attribution_method": "commit_diff_async_pending" if status == "pending" else "commit_diff_generated_artifact_skipped",
+            "product_detail_policy": "line_attribution_summary_only",
+        }
+    )
+    for heavy_key in ("hunks", "changes", "patch", "diff"):
+        change.pop(heavy_key, None)
+    return change
+
+
+def _line_attr_by_line(rows: list[AiLineAttribution]) -> dict[int, AiLineAttribution]:
+    by_line: dict[int, AiLineAttribution] = {}
+    for row in rows:
+        by_line.setdefault(int(row.line_no), row)
+    return by_line
+
+
+def _apply_commit_ai_attribution(
+    db: Session,
+    event: EventIn,
+    occurred: datetime,
+    change: dict[str, Any],
+    *,
+    defer_large_commit: bool = True,
+) -> dict[str, Any]:
     if event.event_type != "commit_snapshot":
         return change
 
+    change = _mark_generated_artifact(change)
     commit_file_path = _normalize_code_path(change.get("file_path"))
+    if change.get("generated_artifact"):
+        return _apply_pending_commit_attribution(change, commit_file_path, "generated_artifact_excluded_from_ai_attribution")
     declared_line_count = int(change.get("lines_added") or 0) + int(change.get("lines_deleted") or 0)
     keep_full_line_attribution = declared_line_count <= PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT
     payload = event.payload if isinstance(event.payload, dict) else {}
-    if (
+    large_captured_diff = (
         _captured_mutation_line_count(change) > PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT
         or _payload_captured_mutation_line_count(payload) > PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT
-    ):
-        return _apply_summary_only_commit_attribution(change, commit_file_path)
+    )
+    if large_captured_diff and defer_large_commit:
+        return _apply_pending_commit_attribution(change, commit_file_path, "async_line_attribution_pending")
     scope = _line_scope_from_event(event, payload)
     ai_pool: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for evidence in _matching_ai_evidence_rows(db, event, occurred):
@@ -2208,8 +2359,12 @@ def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime
     hunk_summaries: list[dict[str, Any]] = []
     attributed_hunks: list[dict[str, Any]] = []
     ledger_updates: list[dict[str, Any]] = []
-    ledger_content_pool = _line_attr_content_pool(db, scope, commit_file_path)
     ledger_rows_for_file = _line_attr_rows_for_file(db, scope, commit_file_path)
+    ledger_content_pool: dict[tuple[str, str], list[AiLineAttribution]] = {}
+    for row in ledger_rows_for_file:
+        for key in _line_content_keys(row.text_hash, row.text_preview):
+            ledger_content_pool.setdefault(key, []).append(row)
+    ledger_by_line = _line_attr_by_line(ledger_rows_for_file)
     consumed_ledger_ids: set[int] = set()
     moved_added_counter: Counter[tuple[str, str]] = Counter()
 
@@ -2293,7 +2448,7 @@ def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime
             if ledger and ledger.id:
                 consumed_ledger_ids.add(ledger.id)
             elif not (line_type == "added" and has_aligned_insertions):
-                ledger = _find_line_attr(db, scope, commit_file_path, line_no) if line_no else None
+                ledger = ledger_by_line.get(line_no) if line_no else None
                 if ledger and ledger.id:
                     consumed_ledger_ids.add(ledger.id)
             if not ledger and line_type == "added":
@@ -2371,7 +2526,7 @@ def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime
                         hunk_counts["ai_assisted_human_edited_added"] += 1
                     else:
                         human_current_added += 1
-                if line_no and _line_is_trackable(line.get("text")):
+                if keep_full_line_attribution and line_no and _line_is_trackable(line.get("text")):
                     ledger_updates.append(
                         {
                             "action": "upsert",
@@ -2400,7 +2555,7 @@ def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime
                         hunk_counts["ai_origin_deleted_by_human"] += 1
                     else:
                         human_current_deleted += 1
-                if line_no:
+                if keep_full_line_attribution and line_no:
                     ledger_updates.append({"action": "delete", "file_path": commit_file_path, "line_no": line_no})
             if evidence and evidence.get("event_id"):
                 matched_events.add(str(evidence["event_id"]))
@@ -2482,6 +2637,7 @@ def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime
             "line_attribution": line_attribution,
             "line_attribution_summary": line_attribution_summary,
             "line_attribution_truncated": not keep_full_line_attribution,
+            "attribution_status": "complete",
             "ai_attribution_method": "commit_diff_line_ledger_and_text_hash_evidence",
         }
     )
@@ -2524,6 +2680,7 @@ def _upsert_ai_code_changes(db: Session, event: EventIn, session_id: str, normal
         if not isinstance(change, dict):
             continue
         occurred = _parse_time(change.get("occurred_at"), event.occurred_at)
+        change = _mark_generated_artifact(change)
         change = _apply_commit_ai_attribution(db, event, occurred, change)
         change = _summarize_large_code_change(change)
         turn = _turn_for_change(turns, change, occurred)
@@ -3218,7 +3375,7 @@ def _persist_attributed_commit_change(db: Session, code_change: AiCodeChange) ->
         if not isinstance(change, dict):
             continue
         occurred = _parse_time(change.get("occurred_at"), code_change.occurred_at)
-        attributed = _apply_commit_ai_attribution(db, event, occurred, dict(change))
+        attributed = _apply_commit_ai_attribution(db, event, occurred, dict(change), defer_large_commit=False)
         updates = attributed.get("_line_ledger_updates")
         if isinstance(updates, list):
             _apply_commit_line_ledger_updates(db, event, occurred, _line_scope_from_event(event, event.payload if isinstance(event.payload, dict) else {}), updates)
