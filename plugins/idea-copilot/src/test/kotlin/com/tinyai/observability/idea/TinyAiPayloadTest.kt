@@ -24,6 +24,8 @@ class TinyAiPayloadTest {
     fun `public http collector requires token`() {
         assertEquals(true, isCollectorUploadAllowedForUrl("http://127.0.0.1:18080", ""))
         assertEquals(true, isCollectorUploadAllowedForUrl("http://10.1.2.3:18080", ""))
+        assertEquals(false, isCollectorUploadAllowedForUrl("http://10.foo.2.3.4", ""))
+        assertEquals(false, isCollectorUploadAllowedForUrl("http://10.1.2.999", ""))
         assertEquals(false, isCollectorUploadAllowedForUrl("http://example.com", ""))
         assertEquals(true, isCollectorUploadAllowedForUrl("https://example.com", "token"))
     }

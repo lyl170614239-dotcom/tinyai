@@ -31,8 +31,10 @@ fun isCollectorUploadAllowedForUrl(baseUrl: String, token: String): Boolean {
     val host = uri.host?.lowercase()?.removePrefix("[")?.removeSuffix("]") ?: return false
     if (host == "localhost" || host == "127.0.0.1" || host == "::1") return true
 
-    val octets = host.split(".").mapNotNull { it.toIntOrNull() }
-    if (octets.size != 4) return false
+    val labels = host.split(".")
+    if (labels.size != 4) return false
+    val octets = labels.map { label -> label.toIntOrNull() ?: return false }
+    if (octets.any { it !in 0..255 }) return false
 
     return when {
         octets[0] == 10 -> true
