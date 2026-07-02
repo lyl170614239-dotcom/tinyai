@@ -19,7 +19,7 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 Run these commands:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main --sparse .agents/plugins --sparse plugins/codex/plugins/observability
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref codex/plugin-marketplace --sparse .agents/plugins --sparse plugins/codex/plugins/observability
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -94,7 +94,7 @@ If this Codex version does not support `--sparse`, retry the marketplace add
 without it:
 
 ```bash
-codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref main
+codex plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git --ref codex/plugin-marketplace
 codex plugin add observability@tinyai
 codex plugin list
 ```
@@ -156,6 +156,11 @@ mv "$TINYAI_ENV.tmp" "$TINYAI_ENV"
 Do not collect or write email fields. Set both `TINYAI_OBS_USER_ID` and
 `TINYAI_OBS_CODEX_USER_ID` to the confirmed name. Do not leave the user as
 `user` or `unknown` unless the user explicitly refuses to provide a name.
+
+Clean stale TinyAI Codex config and cache before verification. Remove old
+hard-coded MCP paths and old plugin cache directories, but do not delete
+`~/.tinyai-observability/queue-*.jsonl`; queues may contain retryable data and
+the current runtime dead-letters permanent schema failures.
 
 4. Run the collector smoke test below. Do not claim collector connectivity
 succeeded if the smoke test fails.

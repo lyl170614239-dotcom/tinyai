@@ -45,8 +45,7 @@ Prefer VS Code/Cursor settings for user identity:
 ```json
 {
   "tinyaiObservability.userName": "<name>",
-  "tinyaiObservability.userEmail": "<email-if-known>",
-  "tinyaiObservability.userId": "<email-or-name>"
+  "tinyaiObservability.userId": "<name>"
 }
 ```
 
@@ -62,9 +61,18 @@ Use:
 TINYAI_OBS_USER_NAME=<name>
 TINYAI_OBS_USER_DISPLAY_NAME=<name>
 TINYAI_OBS_USERNAME=<name>
-TINYAI_OBS_USER_EMAIL=<email-if-known>
-TINYAI_OBS_USER_ID=<email-or-name>
+TINYAI_OBS_USER_ID=<name>
 ```
+
+Do not collect or write email fields. If old VS Code/Cursor settings or TinyAI
+env files contain email identity keys, remove those keys during setup.
+
+## Clean Legacy Local State
+
+Before verification, uninstall or replace older TinyAI Observability VSIX
+versions and remove stale email identity settings. Keep local queue files; they
+may contain retryable data and the current extension dead-letters permanent
+schema failures.
 
 ## Verify
 

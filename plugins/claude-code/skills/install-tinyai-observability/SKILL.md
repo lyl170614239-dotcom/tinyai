@@ -19,7 +19,11 @@ https://github.com/lyl170614239-dotcom/tinyai.git
 Run these commands:
 
 ```bash
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+rm -rf /tmp/tinyai-observability-plugins
+git clone --depth 1 --branch codex/plugin-marketplace https://github.com/lyl170614239-dotcom/tinyai.git /tmp/tinyai-observability-plugins
+claude plugin validate /tmp/tinyai-observability-plugins/.claude-plugin/marketplace.json
+claude plugin validate /tmp/tinyai-observability-plugins/plugins/claude-code/.claude-plugin/plugin.json
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 claude plugin marketplace list
@@ -30,7 +34,7 @@ or stale cache, refresh the source first:
 
 ```bash
 claude plugin marketplace remove tinyai
-claude plugin marketplace add https://github.com/lyl170614239-dotcom/tinyai.git
+claude plugin marketplace add /tmp/tinyai-observability-plugins
 claude plugin marketplace update tinyai
 claude plugin install observability@tinyai
 claude plugin marketplace list
@@ -93,6 +97,11 @@ mv "$TINYAI_ENV.tmp" "$TINYAI_ENV"
 Do not collect or write email fields. Set both `TINYAI_OBS_USER_ID` and
 `TINYAI_OBS_CLAUDE_USER_ID` to the confirmed name. Do not leave the user as
 `user` or `unknown` unless the user explicitly refuses to provide a name.
+
+Clean stale TinyAI Claude config and cache before verification. Remove old
+marketplace/cache paths and stale email identity keys, but do not delete
+`~/.tinyai-observability/queue-*.jsonl`; queues may contain retryable data and
+the current runtime dead-letters permanent schema failures.
 
 4. Run the collector smoke test below. Do not claim installation succeeded if
 the smoke test fails.

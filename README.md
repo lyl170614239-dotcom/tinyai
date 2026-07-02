@@ -30,15 +30,15 @@ name, ask one short follow-up question before completing setup.
 These are the intended user-facing prompts:
 
 ```text
-请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Claude Code 插件，我的姓名是张三。
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Claude Code 插件，我的姓名是张三。安装时请清理本地旧版本 TinyAI 配置和插件缓存，不要写入邮箱。
 ```
 
 ```text
-请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Codex 插件，我的姓名是张三。
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI observability Codex 插件，我的姓名是张三。安装时请清理本地旧版本 TinyAI 配置和插件缓存，不要写入邮箱。
 ```
 
 ```text
-请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI Observability VS Code/Copilot 插件，我的姓名是张三。
+请从 https://github.com/lyl170614239-dotcom/tinyai.git 的 codex/plugin-marketplace 分支安装 TinyAI Observability VS Code/Copilot 插件，我的姓名是张三。安装时请清理本地旧版本 TinyAI 配置和插件缓存，不要写入邮箱。
 ```
 
 ## Included Plugins
@@ -65,6 +65,9 @@ These are the intended user-facing prompts:
 - Prefer this branch: `codex/plugin-marketplace`.
 - Use the manifest for the target tool only.
 - Preserve unrelated values in `~/.tinyai-observability/tinyai-observability.env`.
+- Remove stale TinyAI email identity keys and tool-specific legacy config/cache
+  for the target tool before verification. Do not delete local disk queue files;
+  the current runtime moves permanent schema failures to dead-letter files.
 - Configure identity before claiming install success.
 - Run the matching collector smoke test before claiming collector connectivity.
 - Tell the user to restart or reload the target tool after install.
