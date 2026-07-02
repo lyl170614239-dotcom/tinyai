@@ -158,6 +158,10 @@ type AiCodeChange = {
   superseded_by_event_id?: string | null;
   occurred_at: string;
   diff_json?: Record<string, unknown> | null;
+  submitter_username?: string | null;
+  submitter_user_id?: string | null;
+  submitter_display_name?: string | null;
+  submitter_team?: string | null;
 };
 
 type CodeChangesResponse = {
@@ -1301,6 +1305,7 @@ type CommitGroup = {
   commitSha: string;
   branch: string | null;
   occurredAt: string;
+  submitters: string[];
   sessionIds: string[];
   evidenceEventIds: string[];
   fileCount: number;
@@ -1332,6 +1337,20 @@ function commitShaForChange(change: AiCodeChange) {
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return Array.from(new Set(values.filter(Boolean).map(String)));
+}
+
+function submitterName(change: AiCodeChange) {
+  const raw = codeRaw(change);
+  return readableValue(
+    change.submitter_username ||
+      change.submitter_user_id ||
+      raw.submitter_username ||
+      raw.username ||
+      raw.user_id ||
+      change.submitter_display_name ||
+      raw.submitter_display_name,
+    ""
+  );
 }
 
 function matchedAiEventIds(change: AiCodeChange) {
@@ -1370,6 +1389,7 @@ function groupCommitChanges(changes: AiCodeChange[]): CommitGroup[] {
       commitSha,
       branch: branch || null,
       occurredAt: change.occurred_at,
+      submitters: [],
       sessionIds: [],
       evidenceEventIds: [],
       fileCount: 0,
@@ -1402,6 +1422,7 @@ function groupCommitChanges(changes: AiCodeChange[]): CommitGroup[] {
     next.linesAdded += change.lines_added;
     next.linesDeleted += change.lines_deleted;
     next.linesModified += linesModified;
+    next.submitters = uniqueStrings([...next.submitters, submitterName(change)]);
     next.aiCurrentAdded += counts.aiAdded;
     next.aiCurrentDeleted += counts.aiDeleted;
     next.aiCurrentModified += counts.aiModified;
@@ -1990,6 +2011,7 @@ function CommitAttributionCard({ group, defaultOpen = false }: { group: CommitGr
           <span>
             {fmtTime(group.occurredAt)}
             {group.branch ? ` · ${group.branch}` : ""}
+            {group.submitters.length ? ` · 提交人 ${group.submitters.join(" / ")}` : ""}
             {group.sessionIds.length ? ` · 来源 ${group.sessionIds.length} 个会话` : ""}
           </span>
         </div>

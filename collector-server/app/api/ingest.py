@@ -600,26 +600,51 @@ def _summary_diff_json(diff_json: dict | None) -> dict | None:
     return {key: value for key, value in diff_json.items() if key in SUMMARY_DIFF_JSON_KEYS}
 
 
-def _code_change_summary_out(change: AiCodeChange) -> dict:
-    return {
-        "id": change.id,
-        "session_id": change.session_id,
-        "task_id": change.task_id,
-        "event_id": change.event_id,
-        "turn_index": change.turn_index,
-        "request_id": change.request_id,
-        "response_id": change.response_id,
-        "file_path": change.file_path,
-        "change_type": change.change_type,
-        "snapshot_kind": change.snapshot_kind,
-        "diff_hash": change.diff_hash,
-        "lines_added": change.lines_added,
-        "lines_deleted": change.lines_deleted,
-        "is_effective": change.is_effective,
-        "superseded_by_event_id": change.superseded_by_event_id,
-        "diff_json": _summary_diff_json(change.diff_json),
-        "occurred_at": _beijing_iso(change.occurred_at),
-    }
+def _raw_event_submitters(db: Session, changes: list[AiCodeChange]) -> dict[str, RawIngestEvent]:
+    event_ids = list({change.event_id for change in changes if change.event_id})
+    if not event_ids:
+        return {}
+    rows = db.execute(select(RawIngestEvent).where(RawIngestEvent.event_id.in_(event_ids))).scalars().all()
+    return {row.event_id: row for row in rows}
+
+
+def _with_submitter(payload: dict, raw: RawIngestEvent | None) -> dict:
+    if raw is None:
+        return payload
+    payload.update(
+        {
+            "submitter_username": raw.username,
+            "submitter_user_id": raw.user_id,
+            "submitter_display_name": raw.user_display_name,
+            "submitter_team": raw.team,
+        }
+    )
+    return payload
+
+
+def _code_change_summary_out(change: AiCodeChange, raw: RawIngestEvent | None = None) -> dict:
+    return _with_submitter(
+        {
+            "id": change.id,
+            "session_id": change.session_id,
+            "task_id": change.task_id,
+            "event_id": change.event_id,
+            "turn_index": change.turn_index,
+            "request_id": change.request_id,
+            "response_id": change.response_id,
+            "file_path": change.file_path,
+            "change_type": change.change_type,
+            "snapshot_kind": change.snapshot_kind,
+            "diff_hash": change.diff_hash,
+            "lines_added": change.lines_added,
+            "lines_deleted": change.lines_deleted,
+            "is_effective": change.is_effective,
+            "superseded_by_event_id": change.superseded_by_event_id,
+            "diff_json": _summary_diff_json(change.diff_json),
+            "occurred_at": _beijing_iso(change.occurred_at),
+        },
+        raw,
+    )
 
 
 def _line_number_for_attr(line: dict, line_type: str) -> int | None:
@@ -694,30 +719,38 @@ def _annotated_diff_json(change: AiCodeChange, line_attrs: list[AiLineAttributio
     return diff_json
 
 
-def _code_change_out_with_line_attrs(change: AiCodeChange, line_attrs: list[AiLineAttribution]) -> dict:
-    return {
-        "id": change.id,
-        "session_id": change.session_id,
-        "task_id": change.task_id,
-        "event_id": change.event_id,
-        "turn_index": change.turn_index,
-        "request_id": change.request_id,
-        "response_id": change.response_id,
-        "file_path": change.file_path,
-        "change_type": change.change_type,
-        "snapshot_kind": change.snapshot_kind,
-        "diff_hash": change.diff_hash,
-        "lines_added": change.lines_added,
-        "lines_deleted": change.lines_deleted,
-        "is_effective": change.is_effective,
-        "superseded_by_event_id": change.superseded_by_event_id,
-        "diff_json": _annotated_diff_json(change, line_attrs),
-        "occurred_at": _beijing_iso(change.occurred_at),
-    }
+def _code_change_out_with_line_attrs(
+    change: AiCodeChange,
+    line_attrs: list[AiLineAttribution],
+    raw: RawIngestEvent | None = None,
+) -> dict:
+    return _with_submitter(
+        {
+            "id": change.id,
+            "session_id": change.session_id,
+            "task_id": change.task_id,
+            "event_id": change.event_id,
+            "turn_index": change.turn_index,
+            "request_id": change.request_id,
+            "response_id": change.response_id,
+            "file_path": change.file_path,
+            "change_type": change.change_type,
+            "snapshot_kind": change.snapshot_kind,
+            "diff_hash": change.diff_hash,
+            "lines_added": change.lines_added,
+            "lines_deleted": change.lines_deleted,
+            "is_effective": change.is_effective,
+            "superseded_by_event_id": change.superseded_by_event_id,
+            "diff_json": _annotated_diff_json(change, line_attrs),
+            "occurred_at": _beijing_iso(change.occurred_at),
+        },
+        raw,
+    )
 
 
 def _code_changes_out_with_attrs(db: Session, changes: list[AiCodeChange]) -> list[dict]:
     event_ids = [change.event_id for change in changes if change.event_id]
+    raw_by_event = _raw_event_submitters(db, changes)
     line_attrs = (
         db.execute(select(AiLineAttribution).where(AiLineAttribution.last_event_id.in_(event_ids))).scalars().all()
         if event_ids
@@ -728,7 +761,11 @@ def _code_changes_out_with_attrs(db: Session, changes: list[AiCodeChange]) -> li
         if attr.last_event_id:
             line_attrs_by_event.setdefault(attr.last_event_id, []).append(attr)
     return [
-        _code_change_out_with_line_attrs(change, line_attrs_by_event.get(change.event_id or "", []))
+        _code_change_out_with_line_attrs(
+            change,
+            line_attrs_by_event.get(change.event_id or "", []),
+            raw_by_event.get(change.event_id or ""),
+        )
         for change in changes
     ]
 
@@ -1017,8 +1054,13 @@ def list_code_changes(
         query = query.join(AiSession, AiSession.session_id == AiCodeChange.session_id)
         query = query.where(_identity_filter_for_session(username))
     changes = db.execute(query).scalars().all()
+    if summary:
+        raw_by_event = _raw_event_submitters(db, changes)
+        code_changes = [_code_change_summary_out(change, raw_by_event.get(change.event_id or "")) for change in changes]
+    else:
+        code_changes = _code_changes_out_with_attrs(db, changes)
     return {
-        "code_changes": [_code_change_summary_out(change) for change in changes] if summary else _code_changes_out_with_attrs(db, changes),
+        "code_changes": code_changes,
         "limit": limit,
         "kind": kind or "all",
         "username_filter": username,
