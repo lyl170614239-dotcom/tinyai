@@ -156,6 +156,30 @@ test("commit snapshots preserve raw git committer identity as payload evidence",
   }
 });
 
+test("commit snapshots handle large commit diffs without falling back to snapshot_failed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tinyai-large-git-commit-"));
+  try {
+    await exec("git", ["init"], { cwd: dir });
+    await exec("git", ["config", "user.name", "quincy"], { cwd: dir });
+    await exec("git", ["config", "user.email", "quincy@example.invalid"], { cwd: dir });
+    const content = Array.from({ length: 90_000 }, (_, index) => `line-${index}`).join("\n") + "\n";
+    await writeFile(join(dir, "large.txt"), content, "utf8");
+    await exec("git", ["add", "large.txt"], { cwd: dir });
+    await exec("git", ["commit", "-m", "large commit"], { cwd: dir });
+
+    const snapshot = await commitSnapshot(dir, "HEAD", { aiAssisted: true });
+
+    assert.match(snapshot.commit_sha || "", /^[0-9a-f]{40}$/);
+    assert.notEqual(snapshot.ai_attribution_evidence, "snapshot_failed");
+    assert.equal(snapshot.files_changed, 1);
+    assert.equal(snapshot.lines_added, 90_000);
+    assert.equal(snapshot.files?.[0]?.lines_added, 90_000);
+    assert.equal(snapshot.truncated, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("post-commit hook uploads git boundary with installer identity and raw git author evidence", async () => {
   const dir = await mkdtemp(join(tmpdir(), "tinyai-git-boundary-upload-"));
   const queuePath = join(dir, "git-queue.jsonl");

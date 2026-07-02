@@ -247,7 +247,7 @@ if (eventType === "ai_line_snapshot") {
 }
 if (eventType === "commit_snapshot") {
     const snapshot = await commitSnapshot(workspacePath, "HEAD", { requireAiMarker });
-    if (snapshot.ai_assisted || !skipUnmarkedCommits) {
+    if (snapshot.commit_sha && (snapshot.ai_assisted || !skipUnmarkedCommits)) {
         events.push(makeEvent({
             tool,
             eventType: "commit_snapshot",

@@ -4645,6 +4645,76 @@ class IngestServiceTests(unittest.TestCase):
         self.assertEqual(diff_json["product_detail_policy"], "line_attribution_summary_only")
         self.assertEqual(diff_json["line_attribution_summary"]["total_added_lines"], 5001)
 
+    def test_large_commit_snapshot_skips_sync_line_matching_when_captured_lines_exceed_limit(self):
+        file_path = "collector-server/tests/huge-commit.py"
+        lines = [
+            {
+                "line_type": "added",
+                "new_line": index + 1,
+                "text": f"line-{index}",
+                "text_hash": hashlib.sha256(f"{file_path}\0line-{index}".encode("utf-8")).hexdigest(),
+            }
+            for index in range(5001)
+        ]
+        event = EventIn(
+            event_id="huge-commit-summary-only",
+            task_id="commit-huge",
+            tool="git",
+            event_type="commit_snapshot",
+            occurred_at=datetime(2026, 6, 24, 10, 5, tzinfo=timezone.utc),
+            source_confidence="derived",
+            username="lyl",
+            user_id="user-1",
+            workspace_path_hash="workspace-huge",
+            payload={
+                "commit_sha": "hugecommit",
+                "branch": "main",
+                "snapshot_kind": "commit",
+                "files_changed": 1,
+                "lines_added": 5001,
+                "lines_deleted": 0,
+                "file_paths": [file_path],
+                "files": [
+                    {
+                        "file_path": file_path,
+                        "lines_added": 5001,
+                        "lines_deleted": 0,
+                        "hunks": [
+                            {
+                                "old_start": 0,
+                                "old_lines": 0,
+                                "new_start": 1,
+                                "new_lines": 5001,
+                                "lines": lines,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        batch = BatchIn(
+            client_id="client-1",
+            plugin_name="tinyai-observability-git-hook",
+            plugin_version="0.1.20",
+            username="lyl",
+            user_id="user-1",
+            events=[event],
+        )
+
+        ingest_batch(self.db, batch)
+        stats = process_pending_ingest_jobs(self.db, limit=10, worker_id="test-worker")
+        change = self.db.execute(select(AiCodeChange).where(AiCodeChange.event_id == "huge-commit-summary-only")).scalars().one()
+        diff_json = change.diff_json
+
+        self.assertEqual(stats["succeeded"], 1)
+        self.assertEqual(change.lines_added, 5001)
+        self.assertEqual(diff_json["human_lines_added"], 5001)
+        self.assertEqual(diff_json["ai_lines_added"], 0)
+        self.assertEqual(diff_json["product_detail_policy"], "line_attribution_summary_only")
+        self.assertEqual(diff_json["line_attribution_summary"]["total_added_lines"], 5001)
+        self.assertTrue(diff_json["line_attribution_summary"]["sync_line_matching_skipped"])
+        self.assertNotIn("hunks", diff_json)
+
     def test_session_detail_prefers_tool_patch_over_legacy_editor_delta(self):
         editor_delta = AiCodeChange(
             session_id="copilot-session",

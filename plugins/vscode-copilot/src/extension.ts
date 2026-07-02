@@ -3021,6 +3021,12 @@ async function recordCommitSnapshot(options: { silent?: boolean } = {}) {
     aiAssisted: true,
     attributionEvidence: "manual_vscode_commit_snapshot"
   });
+  if (!snapshot.commit_sha) {
+    if (!options.silent) {
+      vscode.window.showWarningMessage("TinyAI could not read the current git commit diff; no commit snapshot was uploaded.");
+    }
+    return;
+  }
   pendingEvents.push(makeEvent({
     tool: "git",
     eventType: "commit_snapshot",

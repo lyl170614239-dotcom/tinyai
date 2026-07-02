@@ -916,10 +916,13 @@ function claudeWorkspaceDiffPathCandidates(snapshot) {
 var execFileAsync = promisify(execFile);
 
 // ../../plugin-runtime/dist/claude-turn.js
+import { execFile as execFile2 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir2 } from "node:os";
-import { basename, isAbsolute, join as join3, resolve as resolve2 } from "node:path";
+import { basename, isAbsolute, join as join3, relative, resolve as resolve2 } from "node:path";
 import { open, readdir, readFile as readFile2, stat as stat2 } from "node:fs/promises";
+import { promisify as promisify2 } from "node:util";
+var execFileAsync2 = promisify2(execFile2);
 var CLAUDE_TURN_PARSER_VERSION = "claude-turn-v1.0.3";
 var JSONL_READ_CHUNK_BYTES = 1024 * 1024;
 var CLAUDE_NON_PROMPT_TAGS = [
@@ -1189,26 +1192,126 @@ function uniqueIndexOf(haystack, needle) {
     return void 0;
   return haystack.indexOf(needle, first + needle.length) < 0 ? first : void 0;
 }
+function sequenceStartIndexes(haystack, needle) {
+  if (needle.length === 0 || needle.length > haystack.length)
+    return [];
+  const matches = [];
+  for (let index = 0; index <= haystack.length - needle.length; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < needle.length; offset += 1) {
+      if (haystack[index + offset] !== needle[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched)
+      matches.push(index);
+  }
+  return matches;
+}
 function resolvedToolFilePath(filePath, workspacePath2, cwd3) {
   if (isAbsolute(filePath))
     return filePath;
   const root = cwd3 || workspacePath2;
   return root ? resolve2(root, filePath) : void 0;
 }
-async function absoluteReplacementStartLine(filePath, newText, workspacePath2, cwd3) {
+function gitPathspec(filePath, workspacePath2, cwd3) {
+  const root = cwd3 || workspacePath2;
+  if (!root || filePath.includes("\0"))
+    return void 0;
   const absolutePath = resolvedToolFilePath(filePath, workspacePath2, cwd3);
   if (!absolutePath)
     return void 0;
-  let content;
-  try {
-    content = await readFile2(absolutePath, "utf8");
-  } catch {
+  const pathspec = isAbsolute(filePath) ? relative(root, absolutePath).replace(/\\/g, "/") : filePath.replace(/^\.?\//, "").replace(/\\/g, "/");
+  if (!pathspec || pathspec.startsWith("../") || pathspec === ".." || isAbsolute(pathspec))
     return void 0;
+  return { root, pathspec };
+}
+function parseGitDiffLines(diff) {
+  const hunks = [];
+  let current;
+  let oldLine = 0;
+  let newLine = 0;
+  for (const line of diff.split(/\r?\n/)) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      oldLine = Number.parseInt(hunk[1], 10);
+      newLine = Number.parseInt(hunk[2], 10);
+      current = { old_start: oldLine, new_start: newLine, lines: [] };
+      hunks.push(current);
+      continue;
+    }
+    if (!current || line.startsWith("\\ No newline"))
+      continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      current.lines.push({ line_type: "added", new_line: newLine, text: line.slice(1) });
+      newLine += 1;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      current.lines.push({ line_type: "removed", old_line: oldLine, text: line.slice(1) });
+      oldLine += 1;
+    } else if (line.startsWith(" ")) {
+      current.lines.push({ line_type: "context", old_line: oldLine, new_line: newLine, text: line.slice(1) });
+      oldLine += 1;
+      newLine += 1;
+    }
   }
-  const matchIndex = uniqueIndexOf(content, newText);
-  if (matchIndex === void 0)
+  return hunks;
+}
+async function gitDiffText(root, pathspec, staged) {
+  try {
+    const { stdout } = await execFileAsync2("git", ["-c", "core.quotePath=false", "diff", ...staged ? ["--cached"] : [], "--unified=0", "--no-color", "--", pathspec], {
+      cwd: root,
+      timeout: 2e4,
+      maxBuffer: 1024 * 1024 * 100
+    });
+    return String(stdout || "");
+  } catch {
+    return "";
+  }
+}
+function lineSequenceLocation(hunks, oldLines, newLines) {
+  const candidates = [];
+  for (const hunk of hunks) {
+    const removed = hunk.lines.filter((line) => line.line_type === "removed");
+    const added = hunk.lines.filter((line) => line.line_type === "added");
+    const removedMatches = oldLines.length > 0 ? sequenceStartIndexes(removed.map((line) => line.text), oldLines) : [0];
+    const addedMatches = newLines.length > 0 ? sequenceStartIndexes(added.map((line) => line.text), newLines) : [0];
+    for (const removedIndex of removedMatches) {
+      for (const addedIndex of addedMatches) {
+        const oldStart = oldLines.length > 0 ? removed[removedIndex]?.old_line : added[addedIndex]?.new_line;
+        const newStart = newLines.length > 0 ? added[addedIndex]?.new_line : removed[removedIndex]?.old_line;
+        if (oldStart && newStart)
+          candidates.push({ oldStart, newStart });
+      }
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : void 0;
+}
+async function absoluteReplacementLocation(filePath, oldText, newText, workspacePath2, cwd3) {
+  const absolutePath = resolvedToolFilePath(filePath, workspacePath2, cwd3);
+  if (absolutePath && newText) {
+    try {
+      const content = await readFile2(absolutePath, "utf8");
+      const matchIndex = uniqueIndexOf(content, newText);
+      if (matchIndex !== void 0) {
+        const startLine = countLinesBefore(content, matchIndex) + 1;
+        return { oldStart: startLine, newStart: startLine };
+      }
+    } catch {
+    }
+  }
+  const spec = gitPathspec(filePath, workspacePath2, cwd3);
+  if (!spec)
     return void 0;
-  return countLinesBefore(content, matchIndex) + 1;
+  const oldLines = splitReplacementLines(oldText);
+  const newLines = splitReplacementLines(newText);
+  for (const staged of [false, true]) {
+    const diff = await gitDiffText(spec.root, spec.pathspec, staged);
+    const location = lineSequenceLocation(parseGitDiffLines(diff), oldLines, newLines);
+    if (location)
+      return location;
+  }
+  return void 0;
 }
 async function diffFromReplacement(args, toolName, toolCallId, requestId2, responseId, turnIndex, workspacePath2, cwd3) {
   const filePath = filePathFromArgs(args);
@@ -1220,14 +1323,15 @@ async function diffFromReplacement(args, toolName, toolCallId, requestId2, respo
     return void 0;
   const oldLines = splitReplacementLines(oldText);
   const newLines = splitReplacementLines(newText);
-  const absoluteStartLine = await absoluteReplacementStartLine(filePath, newText, workspacePath2, cwd3);
-  const lineOffset = absoluteStartLine !== void 0 ? absoluteStartLine - 1 : 0;
-  const lineNumberBasis = absoluteStartLine !== void 0 ? "absolute" : "relative";
+  const absoluteLocation = await absoluteReplacementLocation(filePath, oldText, newText, workspacePath2, cwd3);
+  const oldLineOffset = absoluteLocation !== void 0 ? absoluteLocation.oldStart - 1 : 0;
+  const newLineOffset = absoluteLocation !== void 0 ? absoluteLocation.newStart - 1 : 0;
+  const lineNumberBasis = absoluteLocation !== void 0 ? "absolute" : "relative";
   const lines = [];
   oldLines.forEach((line, index) => {
     lines.push({
       line_type: "removed",
-      old_line: lineOffset + index + 1,
+      old_line: oldLineOffset + index + 1,
       text: line,
       text_hash: lineHash(filePath, line)
     });
@@ -1235,7 +1339,7 @@ async function diffFromReplacement(args, toolName, toolCallId, requestId2, respo
   newLines.forEach((line, index) => {
     lines.push({
       line_type: "added",
-      new_line: lineOffset + index + 1,
+      new_line: newLineOffset + index + 1,
       text: line,
       text_hash: lineHash(filePath, line)
     });
@@ -1249,9 +1353,9 @@ async function diffFromReplacement(args, toolName, toolCallId, requestId2, respo
     line_numbers_are_absolute: lineNumberBasis === "absolute",
     hunks: [
       {
-        old_start: lineOffset + 1,
+        old_start: oldLineOffset + 1,
         old_lines: oldLines.length,
-        new_start: lineOffset + 1,
+        new_start: newLineOffset + 1,
         new_lines: newLines.length,
         lines
       }
@@ -2418,16 +2522,26 @@ function copilotTurnSignature(snapshot) {
 var JSONL_READ_CHUNK_BYTES2 = 1024 * 1024;
 
 // ../../plugin-runtime/dist/git.js
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
 import { chmod, mkdir as mkdir2, readFile as readFile3, unlink, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname3, join as join4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { promisify as promisify2 } from "node:util";
-var execFileAsync2 = promisify2(execFile2);
+import { promisify as promisify3 } from "node:util";
+var execFileAsync3 = promisify3(execFile3);
+var DEFAULT_GIT_MAX_BUFFER_MB = 64;
 async function git(workspacePath2, args, timeout = 1e4) {
-  const { stdout } = await execFileAsync2("git", ["-c", "core.quotePath=false", ...args], { cwd: workspacePath2, timeout });
+  const { stdout } = await execFileAsync3("git", ["-c", "core.quotePath=false", ...args], {
+    cwd: workspacePath2,
+    timeout,
+    maxBuffer: gitMaxBufferBytes()
+  });
   return stdout.trim();
+}
+function gitMaxBufferBytes() {
+  const configured = Number.parseInt(process.env.TINYAI_OBS_GIT_MAX_BUFFER_MB || "", 10);
+  const megabytes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_GIT_MAX_BUFFER_MB;
+  return megabytes * 1024 * 1024;
 }
 async function resolvedGitDir(workspacePath2) {
   const gitDir = await git(workspacePath2, ["rev-parse", "--git-dir"]);
@@ -2531,35 +2645,43 @@ function parseUnifiedDiffDetails(diff, options = {}) {
   function addLine(lineType, rawText) {
     if (!currentFile || !currentHunk)
       return;
-    if (currentFile.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0) >= maxLinesPerFile) {
+    const captureLine = currentFile.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0) < maxLinesPerFile;
+    if (!captureLine) {
       truncated = true;
-      return;
     }
-    const display = safeDiffLineText(currentFile.file_path, rawText, includeText);
-    const detail = {
-      line_type: lineType,
-      text: display.text,
-      text_hash: lineHash2(currentFile.file_path, rawText)
-    };
-    if (display.redacted)
-      detail.redacted = true;
+    const detail = captureLine ? (() => {
+      const display = safeDiffLineText(currentFile.file_path, rawText, includeText);
+      const captured = {
+        line_type: lineType,
+        text: display.text,
+        text_hash: lineHash2(currentFile.file_path, rawText)
+      };
+      if (display.redacted)
+        captured.redacted = true;
+      return captured;
+    })() : void 0;
     if (lineType === "added") {
-      detail.new_line = newLine;
+      if (detail)
+        detail.new_line = newLine;
       currentFile.lines_added += 1;
       totalAdded += 1;
       newLine += 1;
     } else if (lineType === "removed") {
-      detail.old_line = oldLine;
+      if (detail)
+        detail.old_line = oldLine;
       currentFile.lines_deleted += 1;
       totalDeleted += 1;
       oldLine += 1;
     } else {
-      detail.old_line = oldLine;
-      detail.new_line = newLine;
+      if (detail) {
+        detail.old_line = oldLine;
+        detail.new_line = newLine;
+      }
       oldLine += 1;
       newLine += 1;
     }
-    currentHunk.lines.push(detail);
+    if (detail)
+      currentHunk.lines.push(detail);
   }
   for (const line of diff.split(/\r?\n/)) {
     if (line.startsWith("diff --git ")) {
@@ -3037,7 +3159,7 @@ function escapeRegExp(value) {
 
 // ../../plugin-runtime/dist/spec-detector.js
 import { readFile as readFile4, readdir as readdir2 } from "node:fs/promises";
-import { join as join5, relative } from "node:path";
+import { join as join5, relative as relative2 } from "node:path";
 function classifySpecPath(filePath) {
   const normalized = filePath.replaceAll("\\", "/");
   const isCatalog = normalized.includes("/_meta/catalog") || normalized.endsWith("_meta/catalog.yml");
@@ -3123,7 +3245,7 @@ async function searchSpecs(workspacePath2, query) {
     if (score > 0) {
       const hitIndexes = terms.map((term) => lower.indexOf(term)).filter((idx) => idx >= 0);
       const firstHit = Math.max(0, Math.min(...hitIndexes) - 120);
-      const relativePath = relative(workspacePath2, file);
+      const relativePath = relative2(workspacePath2, file);
       scored.push({
         path: relativePath,
         excerpt: content.slice(firstHit, firstHit + 420),
@@ -5115,6 +5237,12 @@ async function recordCommitSnapshot(options = {}) {
     aiAssisted: true,
     attributionEvidence: "manual_vscode_commit_snapshot"
   });
+  if (!snapshot.commit_sha) {
+    if (!options.silent) {
+      vscode.window.showWarningMessage("TinyAI could not read the current git commit diff; no commit snapshot was uploaded.");
+    }
+    return;
+  }
   pendingEvents.push(makeEvent({
     tool: "git",
     eventType: "commit_snapshot",

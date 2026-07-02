@@ -202,6 +202,9 @@ async function handleToolCall(name, args) {
             aiAssisted: true,
             attributionEvidence: "manual_mcp_commit_snapshot"
         });
+        if (!snapshot.commit_sha) {
+            return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "commit_snapshot_failed", snapshot }, null, 2) }] };
+        }
         await gitBoundaryClient.upload(gitBoundaryTool, [
             makeEvent({
                 tool: gitBoundaryTool,

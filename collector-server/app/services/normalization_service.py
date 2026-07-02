@@ -800,9 +800,27 @@ def _normalize_process_steps(event: EventIn, payload: dict[str, Any]) -> list[di
     return steps
 
 
+def _is_failed_or_empty_commit_snapshot(payload: dict[str, Any]) -> bool:
+    if payload.get("ai_attribution_evidence") == "snapshot_failed":
+        return True
+    if payload.get("commit_sha") or payload.get("commitSha") or payload.get("sha"):
+        return False
+    files = payload.get("files")
+    changes = payload.get("changes")
+    if isinstance(files, list) and files:
+        return False
+    if isinstance(changes, list) and changes:
+        return False
+    if payload.get("file_path") or payload.get("path"):
+        return False
+    return True
+
+
 def _normalize_code_changes(event: EventIn, payload: dict[str, Any]) -> list[dict[str, Any]]:
     snapshot_kind = str(payload.get("snapshot_kind") or "").lower()
     if snapshot_kind in GLOBAL_WORKSPACE_DIFF_SNAPSHOT_KINDS:
+        return []
+    if event.event_type == "commit_snapshot" and _is_failed_or_empty_commit_snapshot(payload):
         return []
 
     raw_embedded = payload.get("code_changes")

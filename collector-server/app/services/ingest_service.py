@@ -2019,7 +2019,10 @@ def _summarize_large_code_change(change: dict[str, Any]) -> dict[str, Any]:
         "captured_deleted_line_count": int(line_stats.get("captured_deleted_line_count") or change.get("captured_deleted_line_count") or 0),
         "full_line_attribution": False,
         "full_line_attribution_limit": PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT,
+        "sync_line_matching_skipped": bool(existing_summary.get("sync_line_matching_skipped")),
     }
+    if existing_summary.get("skip_reason"):
+        change["line_attribution_summary"]["skip_reason"] = str(existing_summary.get("skip_reason"))
     for heavy_key in ("hunks", "changes", "patch", "diff"):
         change.pop(heavy_key, None)
     change["product_detail_policy"] = "line_attribution_summary_only"
@@ -2067,6 +2070,108 @@ def _apply_commit_line_ledger_updates(
         )
 
 
+def _captured_mutation_line_count(change: dict[str, Any]) -> int:
+    total = 0
+    hunks = change.get("hunks") if isinstance(change.get("hunks"), list) else []
+    for hunk in hunks:
+        if not isinstance(hunk, dict):
+            continue
+        lines = hunk.get("lines") if isinstance(hunk.get("lines"), list) else []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            if _normalize_diff_line_type(line.get("line_type") or line.get("type")) in {"added", "removed"}:
+                total += 1
+    return total
+
+
+def _payload_captured_mutation_line_count(payload: dict[str, Any]) -> int:
+    cached = payload.get("_tinyai_captured_mutation_line_count")
+    if isinstance(cached, int):
+        return cached
+    raw_files = payload.get("files")
+    raw_changes = payload.get("changes")
+    files = raw_files if isinstance(raw_files, list) else raw_changes if isinstance(raw_changes, list) else []
+    total = 0
+    for raw in files:
+        if isinstance(raw, dict):
+            total += _captured_mutation_line_count(raw)
+            if total > PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT:
+                break
+    payload["_tinyai_captured_mutation_line_count"] = total
+    return total
+
+
+def _apply_summary_only_commit_attribution(change: dict[str, Any], commit_file_path: str) -> dict[str, Any]:
+    raw_added_total = int(change.get("lines_added") or 0)
+    raw_deleted_total = int(change.get("lines_deleted") or 0)
+    line_stats = change.get("line_stats") if isinstance(change.get("line_stats"), dict) else {}
+    line_attribution_summary = {
+        "file_path": commit_file_path,
+        "total_added_lines": raw_added_total,
+        "total_deleted_lines": raw_deleted_total,
+        "raw_total_added_lines": raw_added_total,
+        "raw_total_deleted_lines": raw_deleted_total,
+        "ignored_blank_lines": 0,
+        "ai_added_lines": 0,
+        "human_added_lines": raw_added_total,
+        "ai_deleted_lines": 0,
+        "human_deleted_lines": raw_deleted_total,
+        "ai_current_lines_added": 0,
+        "human_current_lines_added": raw_added_total,
+        "ai_assisted_human_edited_lines_added": 0,
+        "ai_current_lines_deleted": 0,
+        "human_current_lines_deleted": raw_deleted_total,
+        "ai_origin_lines_deleted_by_human": 0,
+        "ai_assisted_human_edited_lines_modified": 0,
+        "human_current_lines_modified": 0,
+        "ai_moved_lines": 0,
+        "lines_modified": 0,
+        "ai_lines_modified": 0,
+        "human_lines_modified": 0,
+        "captured_added_line_count": int(line_stats.get("captured_added_line_count") or 0),
+        "captured_deleted_line_count": int(line_stats.get("captured_deleted_line_count") or 0),
+        "full_line_attribution": False,
+        "full_line_attribution_limit": PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT,
+        "sync_line_matching_skipped": True,
+        "skip_reason": "captured_commit_diff_exceeds_sync_line_attribution_limit",
+    }
+    change.update(
+        {
+            "ai_lines_added": 0,
+            "human_lines_added": raw_added_total,
+            "ai_lines_deleted": 0,
+            "human_lines_deleted": raw_deleted_total,
+            "ai_current_lines_added": 0,
+            "human_current_lines_added": raw_added_total,
+            "ai_assisted_human_edited_lines_added": 0,
+            "ai_current_lines_deleted": 0,
+            "human_current_lines_deleted": raw_deleted_total,
+            "ai_origin_lines_deleted_by_human": 0,
+            "ai_assisted_human_edited_lines_modified": 0,
+            "human_current_lines_modified": 0,
+            "ai_moved_lines": 0,
+            "lines_modified": 0,
+            "ai_lines_modified": 0,
+            "human_lines_modified": 0,
+            "ai_added_ratio": _ratio_dict(0, raw_added_total),
+            "ai_deleted_ratio": _ratio_dict(0, raw_deleted_total),
+            "ai_modified_ratio": _ratio_dict(0, 0),
+            "ai_overall_change_ratio": _ratio_dict(0, raw_added_total + raw_deleted_total),
+            "ai_overall_change_ratio_raw_ops": _ratio_dict(0, raw_added_total + raw_deleted_total),
+            "matched_ai_change_event_ids": [],
+            "line_attribution": dict(line_attribution_summary),
+            "line_attribution_summary": line_attribution_summary,
+            "line_attribution_truncated": True,
+            "ai_attribution_method": "commit_diff_summary_only_large_file",
+            "product_detail_policy": "line_attribution_summary_only",
+        }
+    )
+    for heavy_key in ("hunks", "changes", "patch", "diff"):
+        change.pop(heavy_key, None)
+    return change
+
+
 def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime, change: dict[str, Any]) -> dict[str, Any]:
     if event.event_type != "commit_snapshot":
         return change
@@ -2074,7 +2179,13 @@ def _apply_commit_ai_attribution(db: Session, event: EventIn, occurred: datetime
     commit_file_path = _normalize_code_path(change.get("file_path"))
     declared_line_count = int(change.get("lines_added") or 0) + int(change.get("lines_deleted") or 0)
     keep_full_line_attribution = declared_line_count <= PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT
-    scope = _line_scope_from_event(event, event.payload if isinstance(event.payload, dict) else {})
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    if (
+        _captured_mutation_line_count(change) > PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT
+        or _payload_captured_mutation_line_count(payload) > PRODUCT_FULL_LINE_ATTRIBUTION_LIMIT
+    ):
+        return _apply_summary_only_commit_attribution(change, commit_file_path)
+    scope = _line_scope_from_event(event, payload)
     ai_pool: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for evidence in _matching_ai_evidence_rows(db, event, occurred):
         for line in _iter_ai_evidence_diff_lines(db, evidence):

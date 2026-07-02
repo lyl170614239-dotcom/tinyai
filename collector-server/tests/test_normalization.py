@@ -777,6 +777,20 @@ class NormalizationTests(unittest.TestCase):
 
         self.assertEqual(normalized["spec_accesses"], [])
 
+    def test_failed_commit_snapshot_does_not_create_code_changes(self):
+        payload = {
+            "snapshot_kind": "commit",
+            "ai_attribution_evidence": "snapshot_failed",
+            "files_changed": 0,
+            "lines_added": 0,
+            "lines_deleted": 0,
+            "file_paths": [],
+        }
+
+        normalized = normalize_event(self.event(tool="git", event_type="commit_snapshot"), payload)
+
+        self.assertEqual(normalized["code_changes"], [])
+
     def test_turn_snapshot_normalizes_spec_document_catalog(self):
         payload = {
             "session_id": "copilot-session",

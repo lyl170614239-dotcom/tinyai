@@ -9,6 +9,7 @@ import { resolvePluginVersion } from "./plugin-version.js";
 import { redactText } from "./redactor.js";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_GIT_MAX_BUFFER_MB = 64;
 
 export interface GitDiffSummary {
   files_changed: number;
@@ -130,8 +131,18 @@ export interface AttributionOptions {
 }
 
 async function git(workspacePath: string, args: string[], timeout = 10000): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], { cwd: workspacePath, timeout });
+  const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], {
+    cwd: workspacePath,
+    timeout,
+    maxBuffer: gitMaxBufferBytes()
+  });
   return stdout.trim();
+}
+
+function gitMaxBufferBytes(): number {
+  const configured = Number.parseInt(process.env.TINYAI_OBS_GIT_MAX_BUFFER_MB || "", 10);
+  const megabytes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_GIT_MAX_BUFFER_MB;
+  return megabytes * 1024 * 1024;
 }
 
 async function resolvedGitDir(workspacePath: string): Promise<string> {
@@ -245,34 +256,41 @@ function parseUnifiedDiffDetails(diff: string, options: { includeText?: boolean;
 
   function addLine(lineType: DiffDetailLine["line_type"], rawText: string) {
     if (!currentFile || !currentHunk) return;
-    if (currentFile.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0) >= maxLinesPerFile) {
+    const captureLine = currentFile.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0) < maxLinesPerFile;
+    if (!captureLine) {
       truncated = true;
-      return;
     }
-    const display = safeDiffLineText(currentFile.file_path, rawText, includeText);
-    const detail: DiffDetailLine = {
-      line_type: lineType,
-      text: display.text,
-      text_hash: lineHash(currentFile.file_path, rawText)
-    };
-    if (display.redacted) detail.redacted = true;
+    const detail: DiffDetailLine | undefined = captureLine
+      ? (() => {
+          const display = safeDiffLineText(currentFile.file_path, rawText, includeText);
+          const captured: DiffDetailLine = {
+            line_type: lineType,
+            text: display.text,
+            text_hash: lineHash(currentFile.file_path, rawText)
+          };
+          if (display.redacted) captured.redacted = true;
+          return captured;
+        })()
+      : undefined;
     if (lineType === "added") {
-      detail.new_line = newLine;
+      if (detail) detail.new_line = newLine;
       currentFile.lines_added += 1;
       totalAdded += 1;
       newLine += 1;
     } else if (lineType === "removed") {
-      detail.old_line = oldLine;
+      if (detail) detail.old_line = oldLine;
       currentFile.lines_deleted += 1;
       totalDeleted += 1;
       oldLine += 1;
     } else {
-      detail.old_line = oldLine;
-      detail.new_line = newLine;
+      if (detail) {
+        detail.old_line = oldLine;
+        detail.new_line = newLine;
+      }
       oldLine += 1;
       newLine += 1;
     }
-    currentHunk.lines.push(detail);
+    if (detail) currentHunk.lines.push(detail);
   }
 
   for (const line of diff.split(/\r?\n/)) {
